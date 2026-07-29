@@ -17,19 +17,25 @@ CUPS Raster → 8×8 Bayer Dither → JBIG T.85 Compress → PJL/LHPLH Output �
 
 ## Quick Start
 
-### 1. Transfer to ARM device
+### 1. Clone on ARM device
 
 ```bash
-# From your PC (same network)
-scp -r m100d-arm-filter/ user@ARM_DEVICE_IP:/tmp/
+git clone https://github.com/shengshimeiyan/m100d-arm-filter.git
+cd m100d-arm-filter
 ```
 
-### 2. Install filter + PPD
+### 2. One-command build & install
 
 ```bash
-cd /tmp/m100d-arm-filter
 sudo bash install.sh
 ```
+
+This script automatically:
+1. Checks/installs `gcc` and `make`
+2. Downloads JBIG-KIT 2.1 source
+3. Compiles the filter (static binary)
+4. Installs filter + PPD + USB rules
+5. Restarts CUPS
 
 ### 3. Set up as print server (optional)
 
@@ -50,28 +56,32 @@ echo "Hello M100D!" | lp -d M100D
 ### Native (on ARM device)
 
 ```bash
-# Install build deps
-sudo apt-get install gcc make libcups2-dev libcupsimage2-dev
+# Install build deps (only gcc and make needed!)
+sudo apt-get install gcc make
 
 # Download JBIG-KIT 2.1
 wget https://www.cl.cam.ac.uk/~mgk25/jbigkit/download/jbigkit-2.1.tar.gz
 tar xzf jbigkit-2.1.tar.gz
 
-# Build
+# Build (static binary, no libcups dependency)
 make
 
 # Install
 sudo make install
 ```
 
-### Cross-compile (from x86-64)
+### Cross-compile (from x86-64 → aarch64)
 
 ```bash
 # Install cross-compiler
 sudo apt-get install gcc-aarch64-linux-gnu
 
-# Cross-compile
-make CROSS=aarch64-linux-gnu-
+# Cross-compile JBIG objects
+aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -c jbigkit-2.1/libjbig/jbig85.c -o jbig85.o
+aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -c jbigkit-2.1/libjbig/jbig_ar.c -o jbig_ar.o
+
+# Cross-compile filter
+aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh rastertolhplh.c jbig85.o jbig_ar.o -lm -static
 ```
 
 ## Supported Printers
@@ -106,6 +116,7 @@ make CROSS=aarch64-linux-gnu-
 - **Binary size**: 660KB (statically linked)
 - **RAM per page**: ~2MB (well within 512MB device limit)
 - **Storage**: ~1MB total (filter + PPD)
+- **Build deps**: only `gcc` + `make` (no libcups-dev needed!)
 
 ## Print Server Mode
 
@@ -136,6 +147,7 @@ The `setup-print-server.sh` script configures your ARM device as a CUPS print se
 - **PJL separator**: 512 bytes of 0x00
 - **PJL line endings**: `\r\n` (0x0D 0x0A)
 - **CUPS raster reader**: Built-in (no libcups dependency for cross-compilation)
+- **Static linking**: `-lm -static`, zero runtime `.so` dependencies
 
 ## License
 
