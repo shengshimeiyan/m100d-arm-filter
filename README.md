@@ -4,7 +4,7 @@
 
 **Lenovo M100D / L100D 系列 GDI 打印机 ARM 原生 CUPS 过滤器**
 
-[![License](https://img.shields.io/badge/License-GPLv2%2B-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT%20%2B%20JBIG%20GPLv2-blue.svg)](LICENSE)
 [![Architecture](https://img.shields.io/badge/Arch-aarch64%20%7C%20x86__64-green.svg)]()
 [![Static](https://img.shields.io/badge/Linking-Static%20%2B%20Standalone-orange.svg)]()
 
@@ -186,7 +186,10 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 
 ## 许可证
 
-GPLv2+ — JBIG-KIT 2.1 为 GPL 许可，本过滤器链接使用它。
+- **本项目代码**：MIT License
+- **JBIG-KIT 2.1**（jbig85.c / jbig_ar.c）：GPLv2+
+
+编译后的二进制包含 JBIG-KIT 代码，因此分发时整体适用 GPLv2。源码层面本项目采用 MIT 许可。
 
 ## 免责声明
 
@@ -235,4 +238,7 @@ Lenovo M100D, M100DNA, L100D, L100DW, M1520D, M1688DW (all share the same LHPLH 
 
 ## License
 
-GPLv2+ — JBIG-KIT 2.1 is GPL licensed.
+- **This project's code**: MIT License
+- **JBIG-KIT 2.1** (jbig85.c / jbig_ar.c): GPLv2+
+
+Compiled binaries include JBIG-KIT code, so distribution of binaries is subject to GPLv2. The source code itself is MIT licensed.
