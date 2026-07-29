@@ -1,14 +1,32 @@
-# Compiled binaries
+# ── Compiled binaries ──
 rastertolhplh
 rastertolhplh-x86_64
 rastertolhplh-aarch64
 *.o
+*.a
 
-# JBIG-KIT source (downloaded separately)
+# ── JBIG-KIT (downloaded by install.sh) ──
 jbigkit-2.1/
 jbigkit-2.1.tar.gz
 
-# Test files
+# ── Test / debug files ──
 test_output.raw
 test_raster.raw
 test.ps
+test_*.raw
+test_*.txt
+
+# ── OS / editor ──
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# ── Packaging ──
+*.deb
+*.7z
+*.tar.gz
+*.zip
