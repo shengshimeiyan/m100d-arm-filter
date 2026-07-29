@@ -34,6 +34,8 @@
 
 /* CUPS raster sync words */
 #define CUPS_RASTER_SYNC    0x52615333   /* "RaS3" v2 */
+#define CUPS_RASTER_PWG    0x52615332   /* RaS2 PWG Raster */
+#define CUPS_RASTER_REVPWG  0x32536152   /* 2SaR reversed PWG */
 #define CUPS_RASTER_SYNCv1  0x52615374   /* "RaSt" v1 */
 #define CUPS_RASTER_REVSYNC 0x33536152   /* "3SaR" reversed v2 */
 
@@ -195,6 +197,7 @@ static int ras_read(cups_raster_t *ras, void *buf, size_t len)
 static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
 {
     unsigned sync;
+    int skip_pwg_marker = 0;
     unsigned char raw[CUPS_HEADER_SIZE];
 
     if (!ras_read(ras, &sync, 4)) return 0;
@@ -202,6 +205,9 @@ static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
     int swapped = 0;
     if (sync == CUPS_RASTER_SYNC) {
         swapped = 0;
+    } else if (sync == CUPS_RASTER_PWG || sync == CUPS_RASTER_REVPWG) {
+        swapped = 1;   /* PWG Raster header fields are big-endian */
+        skip_pwg_marker = 1;
     } else if (sync == CUPS_RASTER_REVSYNC) {
         swapped = 1;
     } else if (sync == CUPS_RASTER_SYNCv1) {
@@ -213,6 +219,13 @@ static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
 
     /* Copy sync word into raw buffer, then read the rest of the header */
     memcpy(raw, &sync, 4);
+    if (skip_pwg_marker) {
+        /* PWG Raster: "PwgRaster\0" marker occupies the first 10 bytes of
+         * the header fields (offset 4-13), but the rest of the header is
+         * identical to CUPS Raster v2. Just read the full 1792 bytes;
+         * the PwgRaster marker will overwrite unused fields like HWResolution.
+         */
+    }
     if (!ras_read(ras, raw + 4, CUPS_HEADER_SIZE - 4)) return 0;
 
     /* Parse the header fields we need */
