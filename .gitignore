@@ -1,0 +1,14 @@
+# Compiled binaries
+rastertolhplh
+rastertolhplh-x86_64
+rastertolhplh-aarch64
+*.o
+
+# JBIG-KIT source (downloaded separately)
+jbigkit-2.1/
+jbigkit-2.1.tar.gz
+
+# Test files
+test_output.raw
+test_raster.raw
+test.ps
