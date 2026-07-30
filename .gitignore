@@ -1,9 +1,9 @@
-# ── Compiled binaries ──
-rastertolhplh
-rastertolhplh-x86_64
-rastertolhplh-aarch64
+# ── Compiled objects ──
 *.o
 *.a
+
+# ── Local build (name without arch suffix) ──
+rastertolh
 
 # ── JBIG-KIT (downloaded by install.sh) ──
 jbigkit-2.1/
