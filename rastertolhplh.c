@@ -527,8 +527,7 @@ static void halftone_line(const unsigned char *gray_in,
 static int write_page(FILE *fp, cups_raster_t *ras,
                       cups_header_subset_t *header,
                       int page_num, int copies,
-                      const char *doc_title, const char *username,
-                      int is_first_page, int is_last_page)
+                      const char *doc_title, const char *username)
 {
     /*
      * Use the CUPS raster width from the page header as the printable area.
@@ -544,15 +543,13 @@ static int write_page(FILE *fp, cups_raster_t *ras,
     int      resolution = (header->HWResolution[0] >= 1200) ? 1200 : 600;
 
     /* ── PJL header (matches original driver format) ── */
-    /* Only write PJL header for the first page of a multi-page job.
-     * The original driver wraps all pages in a single PJL job:
-     *   UEL + JOB + SET commands + ENTER LANGUAGE + @sj
-     *     @sp page1 + @ep
-     *     @sp page2 + @ep
-     *     ...
-     *   @PJL EOJ
+    /* Each page is a complete PJL job. Since CUPS raster is sequential,
+     * we can't peek ahead to determine if this is the last page.
+     * For single-page jobs (the common case), this is identical to
+     * the original driver. For multi-page jobs, each page is a
+     * separate PJL job — the printer prints each page in sequence.
      */
-    if (is_first_page) {
+    {
         /* UEL + JOB with NAME=PRINTER */
         pjl_printf(fp, "\x1b%%-12345X@PJL JOB NAME=PRINTER");
 
@@ -587,7 +584,8 @@ static int write_page(FILE *fp, cups_raster_t *ras,
 
     /* ── Halftone + JBIG compress ── */
     {
-        unsigned char *gray_line  = malloc(cups_width + 8);
+        unsigned char *gray_line  = malloc(header->cupsBytesPerLine > cups_width + 8
+                                            ? header->cupsBytesPerLine : cups_width + 8);
         unsigned char *prev_line  = calloc(bytes_per_line, 1);
         unsigned char *prev2_line = calloc(bytes_per_line, 1);
         unsigned char *cur_line   = calloc(bytes_per_line, 1);
@@ -670,10 +668,8 @@ static int write_page(FILE *fp, cups_raster_t *ras,
     /* ── LHPLH @ep (End Page) ── */
     write_lhplh_ep(fp);
 
-    /* ── PJL footer (only on last page) ── */
-    if (is_last_page) {
-        pjl_printf(fp, "@PJL EOJ");
-    }
+    /* ── PJL footer ── */
+    pjl_printf(fp, "@PJL EOJ");
 
     return 0;
 }
@@ -745,8 +741,7 @@ int main(int argc, char *argv[])
          * correctly by printing each page in sequence.
          */
         if (write_page(stdout, ras, &header, page, copies,
-                       argv[3], argv[2],
-                       1, 1) != 0) break;
+                       argv[3], argv[2]) != 0) break;
     }
 
     ras_close(ras);
