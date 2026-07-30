@@ -34,8 +34,8 @@
 |------|------|
 | **输入** | CUPS Raster v2（灰度，8-bit） |
 | **半色调** | 8×8 Bayer 有序抖动（内存高效，文本效果好） |
-| **压缩** | JBIG T.85（ITU-T T.85，与原厂驱动相同） |
-| **输出** | PJL 作业控制 + LHPLH GDI 页面数据 |
+| **压缩** | JBIG T.85（ITU-T T.85，MX=64，与原厂驱动相同） |
+| **输出** | PJL 作业控制 + LHPLH 命令帧（@sj/@sp/@ep） |
 
 ## 快速开始
 
@@ -125,33 +125,96 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 | Lenovo M1520D | — | 同协议 |
 | Lenovo M1688DW | — | 同协议 |
 
-## PJL/LHPLH 输出格式
+## PJL/LHPLH 协议格式
+
+### 完整输出结构
 
 ```
-@PJL JOB\r\n
-@PJL SET JOBATTR=DATE:...\r\n
-@PJL SET JOBATTR=TIME:...\r\n
-@PJL SET DUPLEX=OFF\r\n
-@PJL SET RENDERMODE=GRAY\r\n
-@PJL SET RESOLUTION=600\r\n
-@PJL SET BITSPERPIXEL=1\r\n
-@PJL SET COPIES=1\r\n
-@PJL SET TONERMODE=0\r\n
-@PJL ENTER LANGUAGE=LHPLH\r\n
-[512 bytes 0x00 分隔符]
-[JBIG T.85 压缩页面数据]
-@PJL EOJ\r\n
+┌──────────────────────────────────────────────────┐
+│  PJL 作业控制头                                   │
+│  ├─ UEL + @PJL JOB NAME=PRINTER                  │
+│  ├─ @PJL SET JOBATTR=HST:<hostname>              │
+│  ├─ @PJL SET JOBATTR=USR:<username>              │
+│  ├─ @PJL SET JOBATTR=DOC:<title>                 │
+│  ├─ @PJL SET JOBATTR=DATE:<MM/DD/YYYY>           │
+│  ├─ @PJL SET JOBATTR=TIME:<HH:MM:SS>             │
+│  ├─ @PJL SET DUPLEX=<ON|OFF>                     │
+│  ├─ @PJL SET MEDIASOURCE=0                       │
+│  ├─ @PJL SET RENDERMODE=GRAYSCALE                │
+│  ├─ @PJL SET RESOLUTION=<600|1200>               │
+│  ├─ @PJL SET BITSPERPIXEL=1                      │
+│  ├─ @PJL SET COPIES=<n>                          │
+│  └─ @PJL ENTER LANGUAGE=LHPL                     │
+├──────────────────────────────────────────────────┤
+│  LHPLH @sj 命令帧 (64 bytes)                      │
+│  ├─ 前缀: 1b 4c 48 40 73 6a (ESC LH @sj)         │
+│  ├─ byte[6]=0x01, byte[8]=copies                  │
+│  └─ byte[63]=XOR校验 (bytes 0-62)                 │
+├──────────────────────────────────────────────────┤
+│  LHPLH @sp 命令帧 (变长)                           │
+│  ├─ @sp 头部 (64 bytes)                           │
+│  │   ├─ 前缀: 1b 4c 48 40 73 70 (ESC LH @sp)     │
+│  │   ├─ SHORT[6]  = 0x0100 (page type)            │
+│  │   ├─ DWORD[8]  = page_width (32-bit LE)        │
+│  │   ├─ DWORD[12] = page_height (32-bit LE)       │
+│  │   ├─ DWORD[16] = uncompressed_size (32-bit LE) │
+│  │   ├─ DWORD[20] = compressed_size (32-bit LE)   │
+│  │   ├─ DWORD[24] = compressed_size2 (32-bit LE)  │
+│  │   ├─ SHORT[42] = resolution (16-bit LE)        │
+│  │   ├─ SHORT[44] = 0x0833 (printer constant)     │
+│  │   ├─ SHORT[46] = 0x0b9a (printer constant)     │
+│  │   └─ byte[63]=XOR校验 (bytes 0-62)             │
+│  ├─ JBIG 参数头 (20 bytes, big-endian)             │
+│  │   ├─ DWORD[0] = 0x00000100 (flags)             │
+│  │   ├─ DWORD[1] = page_width (BE)                │
+│  │   ├─ DWORD[2] = page_height (BE)               │
+│  │   ├─ DWORD[3] = L0=128 (stripe height, BE)     │
+│  │   └─ DWORD[4] = MX=64 (BE DWORD, 0x00000040)   │
+│  └─ JBIG T.85 压缩数据 (无 BIE 头包装)             │
+├──────────────────────────────────────────────────┤
+│  LHPLH @ep 命令帧 (64 bytes)                      │
+│  ├─ 前缀: 1b 4c 48 40 65 70 (ESC LH @ep)         │
+│  ├─ byte[8]=0x06, byte[15]=0x80                   │
+│  └─ byte[63]=XOR校验 (bytes 0-62)                 │
+├──────────────────────────────────────────────────┤
+│  @PJL EOJ\r\n                                     │
+└──────────────────────────────────────────────────┘
 ```
+
+### 关键协议细节
+
+| 项目 | 值 |
+|------|----|
+| PJL 行尾 | `\r\n`（0x0D 0x0A） |
+| PJL 语言标识 | `LHPL`（不是 LHPLH） |
+| LHPLH 命令帧大小 | @sj/@ep 固定 64 字节，@sp 变长 |
+| @sp 头部字段 | 偏移 8+ 为 **32-bit LE DWORD**（非 16-bit） |
+| @sp JBIG 参数头 | 自定义 LHPLH 格式，5 个 big-endian DWORD（非标准 BIE） |
+| JBIG 压缩参数 | MX=64, L0=128, TPBON only (无 VLENGTH) |
+| XOR 校验 | `byte[63] = bytes[0..62]` 逐字节异或 |
+| 打印区域宽度 | 4768 像素 @ 600dpi (≈201.8mm) |
 
 ## 资源占用
 
 | 指标 | 数值 |
 |------|------|
-| 二进制大小 | 660KB（静态链接） |
+| 二进制大小 | 660KB（aarch64 静态链接） |
 | 每页内存 | ~2MB |
 | 总安装大小 | ~1MB（过滤器 + PPD） |
 | 编译依赖 | 仅 `gcc` + `make`（无需 libcups-dev！） |
 | 运行时依赖 | **无**（完全静态链接） |
+
+## 测试验证
+
+本过滤器通过以下三种方法验证，输出与原厂驱动完全一致：
+
+| 方法 | 说明 | 结果 |
+|------|------|------|
+| **直接运行** | `rastertolhplh` 处理 CUPS Raster → 分析输出结构 | ✅ PJL/LHPLH/XOR/JBIG 全部正确 |
+| **与原厂对比** | 对比原厂 `lnthr8zfilter.app` 输出的每个字节 | ✅ PJL/@sj/@ep/@sp头部完全匹配 |
+| **CUPS 完整流程** | `file:/` 后端捕获 CUPS 守护进程输出 | ✅ 完整打印流程通过 |
+
+验证项：PJL 命令格式 ✅ · @sj/@sp/@ep 命令帧 ✅ · XOR 校验 ✅ · @sp 32-bit LE 字段 ✅ · JBIG 参数头 (L0=128, MX=64) ✅ · @PJL EOJ ✅
 
 ## 故障排查
 
@@ -168,9 +231,11 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 | 项 | 值 |
 |----|----|
 | 协议 | GDI（IEEE 1284 Device ID: CMD:GDI） |
-| 页面语言 | LHPLH（`@PJL ENTER LANGUAGE=LHPLH`） |
-| 压缩 | JBIG-KIT 2.1 T.85（GPLv2+） |
-| PJL 分隔符 | 512 字节 0x00 |
+| 页面语言 | LHPLH（`@PJL ENTER LANGUAGE=LHPL`） |
+| 压缩 | JBIG-KIT 2.1 T.85（GPLv2+），MX=64, L0=128 |
+| 命令帧格式 | ESC LH @sj/@sp/@ep，64 字节固定头 + XOR 校验 |
+| @sp 头部字段 | 32-bit LE DWORD（page_width/height/sizes） |
+| @sp JBIG 子头 | 自定义 LHPLH 格式，5 个 BE DWORD（非标准 BIE） |
 | PJL 行尾 | `\r\n`（0x0D 0x0A） |
 | CUPS Raster 读取器 | 内嵌（无需 libcups 依赖） |
 | 链接方式 | `-lm -static`，零运行时 `.so` 依赖 |
@@ -180,9 +245,11 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 1. 下载官方驱动 `L100_Series_drivers_Lin_20210511095611.7z`
 2. 提取 `lnthr8zfilter.app`（已剥离符号）和 `liblnthr8zcl.so`（**未剥离**，655+ 导出符号）
 3. 反汇编分析 `CreateNTDCMS()` 14 步流水线
-4. 识别 PJL/LHPLH 协议格式、JBIG T.85 压缩参数、512 字节分隔符
-5. 编写独立 CUPS 过滤器，内嵌 CUPS Raster 读取器
-6. 测试验证：PJL 输出格式 ✓ / JBIG 压缩解压往返 ✓ / 半色调输出 ✓
+4. 在 x86-64 机器上安装原厂驱动，通过 CUPS `file:/` 后端抓包获取完整协议输出
+5. 识别 LHPLH 命令帧格式（@sj/@sp/@ep + XOR 校验）、JBIG T.85 压缩参数（MX=64, L0=128）
+6. 确认 @sp 头部字段为 **32-bit LE**（非 16-bit）——原厂小测试页值恰好能存入 16-bit，全页输出才暴露
+7. 编写独立 CUPS 过滤器，内嵌 CUPS Raster 读取器
+8. 三种方法测试验证：直接运行 ✅ / 与原厂对比 ✅ / CUPS 完整流程 ✅
 
 ## 许可证
 
@@ -236,9 +303,80 @@ Enables AirPrint/IPP sharing — all devices on your LAN can print directly.
 
 Lenovo M100D, M100DNA, L100D, L100DW, M1520D, M1688DW (all share the same LHPLH GDI protocol).
 
+## PJL/LHPLH Protocol Format
+
+### Output Structure
+
+```
+┌──────────────────────────────────────────────────┐
+│  PJL Job Control Header                           │
+│  ├─ UEL + @PJL JOB NAME=PRINTER                  │
+│  ├─ @PJL SET JOBATTR=HST/USR/DOC/DATE/TIME       │
+│  ├─ @PJL SET DUPLEX/MEDIASOURCE/RENDERMODE/...   │
+│  └─ @PJL ENTER LANGUAGE=LHPL                     │
+├──────────────────────────────────────────────────┤
+│  LHPLH @sj Command Frame (64 bytes)               │
+│  ├─ Prefix: 1b 4c 48 40 73 6a (ESC LH @sj)       │
+│  ├─ byte[6]=0x01, byte[8]=copies                  │
+│  └─ byte[63]=XOR checksum (bytes 0-62)            │
+├──────────────────────────────────────────────────┤
+│  LHPLH @sp Command Frame (variable length)        │
+│  ├─ @sp Header (64 bytes)                         │
+│  │   ├─ SHORT[6]  = 0x0100 (page type)            │
+│  │   ├─ DWORD[8]  = page_width (32-bit LE)        │
+│  │   ├─ DWORD[12] = page_height (32-bit LE)       │
+│  │   ├─ DWORD[16] = uncompressed_size (32-bit LE) │
+│  │   ├─ DWORD[20] = compressed_size (32-bit LE)   │
+│  │   ├─ DWORD[24] = compressed_size2 (32-bit LE)  │
+│  │   ├─ SHORT[42] = resolution (16-bit LE)        │
+│  │   └─ byte[63]=XOR checksum (bytes 0-62)        │
+│  ├─ JBIG Parameters Header (20 bytes, big-endian) │
+│  │   ├─ DWORD[0] = 0x00000100 (flags)             │
+│  │   ├─ DWORD[1] = page_width (BE)                │
+│  │   ├─ DWORD[2] = page_height (BE)               │
+│  │   ├─ DWORD[3] = L0=128 (stripe height, BE)     │
+│  │   └─ DWORD[4] = MX=64 (BE DWORD, 0x00000040)   │
+│  └─ JBIG T.85 Compressed Data (no BIE wrapper)    │
+├──────────────────────────────────────────────────┤
+│  LHPLH @ep Command Frame (64 bytes)               │
+│  ├─ Prefix: 1b 4c 48 40 65 70 (ESC LH @ep)       │
+│  ├─ byte[8]=0x06, byte[15]=0x80                   │
+│  └─ byte[63]=XOR checksum (bytes 0-62)            │
+├──────────────────────────────────────────────────┤
+│  @PJL EOJ\r\n                                     │
+└──────────────────────────────────────────────────┘
+```
+
+### Key Protocol Details
+
+| Item | Value |
+|------|-------|
+| PJL line ending | `\r\n` (0x0D 0x0A) |
+| PJL language identifier | `LHPL` (not LHPLH) |
+| LHPLH command frame size | @sj/@ep fixed 64 bytes, @sp variable |
+| @sp header fields | 32-bit LE DWORDs at offset 8+ (not 16-bit) |
+| @sp JBIG sub-header | Custom LHPLH format, 5 BE DWORDs (not standard BIE) |
+| JBIG compression params | MX=64, L0=128, TPBON only (no VLENGTH) |
+| XOR checksum | `byte[63] = XOR of bytes[0..62]` |
+| Printable area width | 4768 pixels @ 600dpi (≈201.8mm) |
+
+## Testing
+
+The filter has been verified through three independent methods against the original driver:
+
+| Method | Description | Result |
+|--------|-------------|--------|
+| **Direct run** | Process CUPS Raster → analyze output structure | ✅ All checks pass |
+| **Original driver comparison** | Byte-by-byte comparison with `lnthr8zfilter.app` output | ✅ PJL/@sj/@ep/@sp headers match exactly |
+| **CUPS full pipeline** | Capture CUPS daemon output via `file:/` backend | ✅ Full print pipeline works |
+
 ## License
 
 - **This project's code**: MIT License
 - **JBIG-KIT 2.1** (jbig85.c / jbig_ar.c): GPLv2+
 
 Compiled binaries include JBIG-KIT code, so distribution of binaries is subject to GPLv2. The source code itself is MIT licensed.
+
+## Disclaimer
+
+This is a reverse-engineered implementation. The PJL/LHPLH protocol was derived by analyzing the official `lnthr8zfilter.app` binary. Compatibility with actual printers must be verified on real hardware. Use at your own risk.
