@@ -154,30 +154,30 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 │  LHPLH @sp 命令帧 (变长)                           │
 │  ├─ @sp 头部 (64 bytes)                           │
 │  │   ├─ 前缀: 1b 4c 48 40 73 70 (ESC LH @sp)     │
-│  │   ├─ SHORT[6]  = 0x0100 (page type)            │
-│  │   ├─ DWORD[8]  = page_width (32-bit LE)        │
+│  │   ├─ SHORT[6]  = 0x0102 (page type, byte6=0x02=JBIG) │
+│  │   ├─ DWORD[8]  = 5120 (printer physical width, 32-bit LE) │
 │  │   ├─ DWORD[12] = page_height (32-bit LE)       │
 │  │   ├─ DWORD[16] = uncompressed_size (32-bit LE) │
-│  │   ├─ DWORD[20] = compressed_size (32-bit LE)   │
-│  │   ├─ DWORD[24] = compressed_size2 (32-bit LE)  │
+│  │   ├─ DWORD[20] = compressed_size+20 (32-bit LE, 含 BIE 头) │
+│  │   ├─ DWORD[24] = compressed_size+20 (32-bit LE, 重复) │
 │  │   ├─ SHORT[42] = resolution (16-bit LE)        │
-│  │   ├─ SHORT[44] = 0x0833 (printer constant)     │
-│  │   ├─ SHORT[46] = 0x0b9a (printer constant)     │
+│  │   ├─ SHORT[44] = 0x0834=2100 (纸张宽度, 0.1mm) │
+│  │   ├─ SHORT[46] = 0x0b9a=2970 (纸张高度, 0.1mm) │
 │  │   └─ byte[63]=XOR校验 (bytes 0-62)             │
 │  ├─ JBIG 参数头 (20 bytes, big-endian)             │
 │  │   ├─ DWORD[0] = 0x00000100 (flags)             │
-│  │   ├─ DWORD[1] = page_width (BE)                │
+│  │   ├─ DWORD[1] = 5120 (printer physical width, BE) │
 │  │   ├─ DWORD[2] = page_height (BE)               │
 │  │   ├─ DWORD[3] = L0=128 (stripe height, BE)     │
-│  │   └─ DWORD[4] = MX=64 (BE DWORD, 0x00000040)   │
+│  │   └─ DWORD[4] = 0x08000040 (MY=2048, MX=64, BE) │
 │  └─ JBIG T.85 压缩数据 (SDRST 终止, 无 BIE 头包装) │
 ├──────────────────────────────────────────────────┤
 │  LHPLH @ep 命令帧 (64 bytes)                      │
 │  ├─ 前缀: 1b 4c 48 40 65 70 (ESC LH @ep)         │
-│  ├─ byte[8]=0x06, byte[15]=0x80                   │
+│  ├─ bytes 6-62 全部为零 (匹配 Windows 驱动)       │
 │  └─ byte[63]=XOR校验 (bytes 0-62)                 │
 ├──────────────────────────────────────────────────┤
-│  @PJL EOJ\r\n                                     │
+│  \x1b%-12345X@PJL EOJ\r\n                         │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -187,13 +187,20 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 |------|----|
 | PJL 行尾 | `\r\n`（0x0D 0x0A） |
 | PJL 语言标识 | `LHPL`（不是 LHPLH） |
+| PJL SET 顺序 | MEDIASOURCE→DUPLEX→MDPXS→BITSPERPIXEL→COPIES→RESOLUTION→RENDERMODE→PCNT |
+| PJL EOJ | `\x1b%-12345X@PJL EOJ\r\n`（含 UEL 前缀） |
 | LHPLH 命令帧大小 | @sj/@ep 固定 64 字节，@sp 变长 |
+| @sp byte[6] | 0x02（JBIG 压缩标志），非 0x00 |
 | @sp 头部字段 | 偏移 8+ 为 **32-bit LE DWORD**（非 16-bit） |
+| @sp page_width | 5120（打印机物理宽度，非 CUPS Raster 宽度） |
+| @sp compressed_size | JBIG 数据大小 + 20（含 BIE 头大小，即使不发送 BIE 头） |
+| @sp 纸张尺寸 | SHORT[44]=0x0834=2100, SHORT[46]=0x0b9a=2970（0.1mm 单位） |
 | @sp JBIG 参数头 | 自定义 LHPLH 格式，5 个 big-endian DWORD（非标准 BIE） |
-| JBIG 压缩参数 | MX=64, L0=128, TPBON only (无 VLENGTH) |
-| JBIG 终止标记 | SDRST (0xFF 0x03)，匹配原厂驱动 |
+| JBIG 压缩参数 | MX=64, MY=2048, L0=128, TPBON=0（DWORD[4]=0x08000040） |
+| JBIG 终止标记 | SDRST (0xFF 0x03)，替换 jbig85 的 SDNORM (0xFF 0x02) |
+| @ep 命令帧 | bytes 6-62 全部为零（非 0x06/0x80） |
 | XOR 校验 | `byte[63] = bytes[0..62]` 逐字节异或 |
-| 打印区域宽度 | 从 CUPS Raster 头部读取（PPD 定义 cupsWidth=4760） |
+| 打印区域宽度 | 固定 5120 像素（600 DPI），内容左对齐，剩余填零 |
 
 ## 资源占用
 
@@ -207,39 +214,48 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 
 ## 测试验证
 
-本过滤器通过以下三种方法验证，输出与原厂驱动完全一致：
+本过滤器通过以下方法验证：
 
 | 方法 | 说明 | 结果 |
 |------|------|------|
-| **直接运行** | `rastertolhplh` 处理 CUPS Raster → 分析输出结构 | ✅ PJL/LHPLH/XOR/JBIG 全部正确 |
-| **与原厂对比** | 对比原厂 `lnthr8zfilter.app` 输出的每个字节 | ✅ PJL/@sj/@ep/@sp头部完全匹配 |
-| **CUPS 完整流程** | `file:/` 后端捕获 CUPS 守护进程输出 | ✅ 完整打印流程通过 |
+| **直接运行** | `rastertolhplh` 处理 CUPS Raster → 分析输出结构 | ✅ PJL/LHPLH/XOR 全部正确 |
+| **Windows 驱动对比** | GDI 抓包 Windows 驱动输出，逐字节对比 | ✅ PJL/@sj/@ep/@sp头部完全匹配（8项修正后） |
+| **CUPS 完整流程** | `lp` 命令 → CUPS → 过滤器 → 打印机 | ✅ 打印机出纸（JBIG 编码内容待修复） |
+| **USB 直送** | `cat output.bin > /dev/usb/lp0` | ✅ Windows 驱动输出可正常打印 |
 
-验证项：PJL 命令格式 ✅ · @sj/@sp/@ep 命令帧 ✅ · XOR 校验 ✅ · @sp 32-bit LE 字段 ✅ · JBIG 参数头 (L0=128, MX=64) ✅ · @PJL EOJ ✅
+验证项：PJL 命令格式 ✅ · @sj/@sp/@ep 命令帧 ✅ · XOR 校验 ✅ · @sp 32-bit LE 字段 ✅ · JBIG 参数头 (L0=128, MY:MX=0x08000040) ✅ · SDRST 终止 ✅ · @PJL EOJ (含 UEL) ✅ · compressed_size+20 ✅ · page_width=5120 ✅
+
+⚠️ **已知问题**：JBIG 编码输出与 Windows 驱动存在差异（空白条纹 2B vs 4B、Stripe 0 大小 686B vs 129B），打印机出纸但内容不正确，正在调试中。
 
 ## 故障排查
 
 | 现象 | 可能原因 | 解决方法 |
 |------|---------|---------|
 | 打印机无反应 | USB 权限问题 | `lsusb` 检查，确认 udev 规则 |
-| 输出乱码/全黑 | JBIG 参数不对 | 调整源码中 L0、MX 值 |
+| 打印机无反应 | CUPS 用了 libusb 后端 | 改用 usblp 内核驱动 + `file:///dev/usb/lp0` 或 `socket://localhost:9100` + socat |
+| 输出乱码/全黑 | JBIG 参数不对 | 调整源码中 L0、MX、MY 值 |
 | 打印一半停止 | ABORT 标记问题 | 已修复为 SDRST (0xFF 0x03) 终止 |
+| 内容不正确（灰色纹路） | JBIG 编码差异 | 已知问题，正在调试中 |
 | CUPS 报错 | 查看日志 | `cat /var/log/cups/error_log \| tail -50` |
 | 找不到打印机 | CUPS 未识别 | `sudo lpinfo -l -v` 检查 USB URI |
+| 打印机红绿灯闪烁 | 发送了错误数据 | 断电重启打印机（拔电源线 10 秒） |
+| PWG Raster 不识别 | cspace 18/19 未处理 | 已修复，支持 PWG gray/RGB |
 
 ## 技术细节
 
-| 项 | 值 |
-|----|----|
+| 项目 | 值 |
+|------|------|
 | 协议 | GDI（IEEE 1284 Device ID: CMD:GDI） |
 | 页面语言 | LHPLH（`@PJL ENTER LANGUAGE=LHPL`） |
-| 压缩 | JBIG-KIT 2.1 T.85（GPLv2+），MX=64, L0=128, SDRST 终止 |
+| 压缩 | JBIG-KIT 2.1 T.85（GPLv2+），MX=64, MY=2048, L0=128, SDRST 终止 |
 | 命令帧格式 | ESC LH @sj/@sp/@ep，64 字节固定头 + XOR 校验 |
-| @sp 头部字段 | 32-bit LE DWORD（page_width/height/sizes） |
+| @sp 头部字段 | 32-bit LE DWORD（page_width=5120/height/sizes） |
 | @sp JBIG 子头 | 自定义 LHPLH 格式，5 个 BE DWORD（非标准 BIE） |
-| 页面宽度 | 从 CUPS Raster 头部读取（非硬编码） |
+| @sp byte[6] | 0x02（JBIG 压缩标志） |
+| 页面宽度 | 5120（打印机物理宽度，600 DPI） |
 | PJL 行尾 | `\r\n`（0x0D 0x0A） |
-| CUPS Raster 读取器 | 内嵌（无需 libcups 依赖） |
+| CUPS Raster 读取器 | 内嵌（无需 libcups 依赖），支持 PWG Raster (RaS2/RaS3) |
+| NegativePrint | PPD 中 `NegativePrint true`，半色调需适配反转像素值 |
 | 链接方式 | `-lm -static`，零运行时 `.so` 依赖 |
 
 ## 逆向工程过程
@@ -254,6 +270,9 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 8. 页面宽度从 CUPS Raster 头部动态读取——不再硬编码 4768，适配 PPD 配置
 9. 编写独立 CUPS 过滤器，内嵌 CUPS Raster 读取器
 10. 三种方法测试验证：直接运行 ✅ / 与原厂对比 ✅ / CUPS 完整流程 ✅
+11. **Windows 驱动 GDI 抓包**：通过 `gdi32.CreateDCW` + `lpszOutput` 参数捕获 Windows 驱动完整输出
+12. **8 项协议修正**：对比 Windows 驱动输出发现 8 处差异（@sp byte6=0x02、纸张宽度 0x0834、MY:MX=0x08000040、@ep 全零、PJL EOJ 含 UEL、PJL SET 顺序、MDPXS/PCNT 参数、compressed_size+20）
+13. **JBIG 编码调试**：打字机能出纸但内容不正确，JBIG 条纹对比发现与 Windows 驱动存在显著差异（待修复）
 
 ## 许可证
 
@@ -326,28 +345,30 @@ Lenovo M100D, M100DNA, L100D, L100DW, M1520D, M1688DW (all share the same LHPLH 
 ├──────────────────────────────────────────────────┤
 │  LHPLH @sp Command Frame (variable length)        │
 │  ├─ @sp Header (64 bytes)                         │
-│  │   ├─ SHORT[6]  = 0x0100 (page type)            │
-│  │   ├─ DWORD[8]  = page_width (32-bit LE)        │
+│  │   ├─ SHORT[6]  = 0x0102 (page type, byte6=0x02=JBIG) │
+│  │   ├─ DWORD[8]  = 5120 (printer physical width, 32-bit LE) │
 │  │   ├─ DWORD[12] = page_height (32-bit LE)       │
 │  │   ├─ DWORD[16] = uncompressed_size (32-bit LE) │
-│  │   ├─ DWORD[20] = compressed_size (32-bit LE)   │
-│  │   ├─ DWORD[24] = compressed_size2 (32-bit LE)  │
+│  │   ├─ DWORD[20] = compressed_size+20 (32-bit LE, incl. BIE header) │
+│  │   ├─ DWORD[24] = compressed_size+20 (32-bit LE, repeated) │
 │  │   ├─ SHORT[42] = resolution (16-bit LE)        │
+│  │   ├─ SHORT[44] = 0x0834=2100 (paper width, 0.1mm) │
+│  │   ├─ SHORT[46] = 0x0b9a=2970 (paper height, 0.1mm) │
 │  │   └─ byte[63]=XOR checksum (bytes 0-62)        │
 │  ├─ JBIG Parameters Header (20 bytes, big-endian) │
 │  │   ├─ DWORD[0] = 0x00000100 (flags)             │
-│  │   ├─ DWORD[1] = page_width (BE)                │
+│  │   ├─ DWORD[1] = 5120 (printer physical width, BE) │
 │  │   ├─ DWORD[2] = page_height (BE)               │
 │  │   ├─ DWORD[3] = L0=128 (stripe height, BE)     │
-│  │   └─ DWORD[4] = MX=64 (BE DWORD, 0x00000040)   │
-│  └─ JBIG T.85 Compressed Data (SDRST termination) │
+│  │   └─ DWORD[4] = 0x08000040 (MY=2048, MX=64, BE) │
+│  └─ JBIG T.85 Compressed Data (SDRST termination, no BIE header) │
 ├──────────────────────────────────────────────────┤
 │  LHPLH @ep Command Frame (64 bytes)               │
 │  ├─ Prefix: 1b 4c 48 40 65 70 (ESC LH @ep)       │
-│  ├─ byte[8]=0x06, byte[15]=0x80                   │
+│  ├─ bytes 6-62 all zeros (matching Windows driver) │
 │  └─ byte[63]=XOR checksum (bytes 0-62)            │
 ├──────────────────────────────────────────────────┤
-│  @PJL EOJ\r\n                                     │
+│  \x1b%-12345X@PJL EOJ\r\n                         │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -357,25 +378,35 @@ Lenovo M100D, M100DNA, L100D, L100DW, M1520D, M1688DW (all share the same LHPLH 
 |------|-------|
 | PJL line ending | `\r\n` (0x0D 0x0A) |
 | PJL language identifier | `LHPL` (not LHPLH) |
+| PJL SET order | MEDIASOURCE→DUPLEX→MDPXS→BITSPERPIXEL→COPIES→RESOLUTION→RENDERMODE→PCNT |
+| PJL EOJ | `\x1b%-12345X@PJL EOJ\r\n` (with UEL prefix) |
 | LHPLH command frame size | @sj/@ep fixed 64 bytes, @sp variable |
+| @sp byte[6] | 0x02 (JBIG compression flag), not 0x00 |
 | @sp header fields | 32-bit LE DWORDs at offset 8+ (not 16-bit) |
+| @sp page_width | 5120 (printer physical width, not CUPS raster width) |
+| @sp compressed_size | JBIG data size + 20 (includes BIE header size, even though BIE header is not sent) |
+| @sp paper dimensions | SHORT[44]=0x0834=2100, SHORT[46]=0x0b9a=2970 (0.1mm units) |
 | @sp JBIG sub-header | Custom LHPLH format, 5 BE DWORDs (not standard BIE) |
-| JBIG compression params | MX=64, L0=128, TPBON only (no VLENGTH) |
-| JBIG termination marker | SDRST (0xFF 0x03), matching original driver |
+| JBIG compression params | MX=64, MY=2048, L0=128, TPBON=0 (DWORD[4]=0x08000040) |
+| JBIG termination marker | SDRST (0xFF 0x03), replacing jbig85's SDNORM (0xFF 0x02) |
+| @ep command frame | bytes 6-62 all zeros (not 0x06/0x80) |
 | XOR checksum | `byte[63] = XOR of bytes[0..62]` |
-| Printable area width | Read from CUPS Raster header (PPD cupsWidth=4760) |
+| Printable area width | Fixed 5120 pixels (600 DPI), content left-aligned, remaining zero-filled |
 
 ## Testing
 
-The filter has been verified through three independent methods against the original driver:
+The filter has been verified through the following methods:
 
 | Method | Description | Result |
 |--------|-------------|--------|
 | **Direct run** | Process CUPS Raster → analyze output structure | ✅ All checks pass |
-| **Original driver comparison** | Byte-by-byte comparison with `lnthr8zfilter.app` output | ✅ PJL/@sj/@ep/@sp headers match exactly |
-| **CUPS full pipeline** | Capture CUPS daemon output via `file:/` backend | ✅ Full print pipeline works |
+| **Windows driver comparison** | GDI capture of Windows driver output, byte-by-byte comparison | ✅ PJL/@sj/@ep/@sp headers match exactly (after 8 fixes) |
+| **CUPS full pipeline** | `lp` → CUPS → filter → printer | ✅ Printer outputs paper (JBIG encoding content needs fix) |
+| **USB direct** | `cat output.bin > /dev/usb/lp0` | ✅ Windows driver output prints correctly |
 
-Verified items: PJL format ✅ · @sj/@sp/@ep command frames ✅ · XOR checksums ✅ · @sp 32-bit LE fields ✅ · JBIG params (L0=128, MX=64) ✅ · SDRST termination ✅ · @PJL EOJ ✅
+Verified items: PJL format ✅ · @sj/@sp/@ep command frames ✅ · XOR checksums ✅ · @sp 32-bit LE fields ✅ · JBIG params (L0=128, MY:MX=0x08000040) ✅ · SDRST termination ✅ · @PJL EOJ (with UEL) ✅ · compressed_size+20 ✅ · page_width=5120 ✅
+
+⚠️ **Known issue**: JBIG encoding output differs from Windows driver (blank stripes 2B vs 4B, Stripe 0 size 686B vs 129B). Printer outputs paper but content is incorrect — under investigation.
 
 ## License
 
