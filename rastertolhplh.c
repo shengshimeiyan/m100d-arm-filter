@@ -56,6 +56,11 @@
 #define CUPS_CSPACE_W       0
 #define CUPS_CSPACE_RGB     1
 #define CUPS_CSPACE_K       3
+#define CUPS_CSPACE_CMY     4
+#define CUPS_CSPACE_CMYK    5
+/* PWG Raster color spaces (offset by 18 from CUPS values) */
+#define CUPS_CSPACE_W2      18   /* PWG gray (sgray) */
+#define CUPS_CSPACE_RGB2    19   /* PWG RGB (srgb) */
 
 /* ── CUPS raster page header ────────────────────────────────────────── */
 /*
@@ -222,18 +227,16 @@ static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
         swapped = 1;
     } else if (sync == CUPS_RASTER_PWG) {
         /* PWG Raster (RaS2) on big-endian machines.
-         * Despite the PWG spec saying header fields are big-endian,
-         * CUPS's pdftoraster/gstoraster output PWG Raster with
-         * native-endian header fields (just like CUPS Raster v2).
-         * The only difference is the sync word and the PwgRaster marker.
-         * So swapped = 0 (same as RaS3 on big-endian). */
+         * Header fields are big-endian (PWG spec), but on a big-endian
+         * machine they are already in native order, so no swap needed. */
         swapped = 0;
         is_pwg = 1;
     } else if (sync == CUPS_RASTER_REVPWG) {
         /* PWG Raster (RaS2) on little-endian machines.
-         * CUPS outputs native-endian header fields regardless of
-         * the PWG spec, so swapped = 0 (native byte order). */
-        swapped = 0;
+         * The sync word bytes 52 61 53 32 read as 0x32536152 on LE.
+         * PWG Raster header fields are big-endian (network byte order),
+         * so we need swapped=1 to convert them to native (LE) order. */
+        swapped = 1;
         is_pwg = 1;
     } else if (sync == CUPS_RASTER_SYNCv1) {
         /* v1 header is only 296 bytes, but we read 1796 — would misalign
@@ -409,7 +412,7 @@ static void write_lhplh_sp(FILE *fp,
     hdr[4] = 's'; hdr[5] = 'p';
 
     /* @sp header fields (mixed 16-bit + 32-bit little-endian) */
-    hdr[6] = 0x00; hdr[7] = 0x01;   /* page type/flags (SHORT, LE: 0x0100) */
+    hdr[6] = 0x02; hdr[7] = 0x01;   /* page type/flags (SHORT, LE: 0x0102) — byte 6=0x02=JBIG compression */
     /* page_width (32-bit LE) */
     hdr[8]  = (page_width >> 0) & 0xFF;
     hdr[9]  = (page_width >> 8) & 0xFF;
@@ -425,23 +428,27 @@ static void write_lhplh_sp(FILE *fp,
     hdr[17] = (uncompressed_size >> 8) & 0xFF;
     hdr[18] = (uncompressed_size >> 16) & 0xFF;
     hdr[19] = (uncompressed_size >> 24) & 0xFF;
-    /* compressed_size (32-bit LE) */
-    hdr[20] = (jbig_len >> 0) & 0xFF;
-    hdr[21] = (jbig_len >> 8) & 0xFF;
-    hdr[22] = (jbig_len >> 16) & 0xFF;
-    hdr[23] = (jbig_len >> 24) & 0xFF;
+    /* compressed_size (32-bit LE) — includes 20-byte BIE header size
+     * even though we don't send the BIE header in the data stream.
+     * The Windows driver sets compressed_size = BIE_header(20) + compressed_data.
+     */
+    unsigned compressed_size = jbig_len + 20;
+    hdr[20] = (compressed_size >> 0) & 0xFF;
+    hdr[21] = (compressed_size >> 8) & 0xFF;
+    hdr[22] = (compressed_size >> 16) & 0xFF;
+    hdr[23] = (compressed_size >> 24) & 0xFF;
     /* compressed_size repeated (32-bit LE) */
-    hdr[24] = (jbig_len >> 0) & 0xFF;
-    hdr[25] = (jbig_len >> 8) & 0xFF;
-    hdr[26] = (jbig_len >> 16) & 0xFF;
-    hdr[27] = (jbig_len >> 24) & 0xFF;
+    hdr[24] = (compressed_size >> 0) & 0xFF;
+    hdr[25] = (compressed_size >> 8) & 0xFF;
+    hdr[26] = (compressed_size >> 16) & 0xFF;
+    hdr[27] = (compressed_size >> 24) & 0xFF;
     /* DWORD[5-7] = 0 (reserved) */
     /* resolution (16-bit LE, at offset 42) */
     hdr[42] = (resolution >> 0) & 0xFF;
     hdr[43] = (resolution >> 8) & 0xFF;
-    /* printer-specific constants (16-bit LE) */
-    hdr[44] = 0x33; hdr[45] = 0x08;   /* SHORT: 0x0833 = 2099 */
-    hdr[46] = 0x9a; hdr[47] = 0x0b;   /* SHORT: 0x0b9a = 2970 */
+    /* printer-specific constants (16-bit LE, in 0.1mm units) */
+    hdr[44] = 0x34; hdr[45] = 0x08;   /* SHORT: 0x0834 = 2100 (210.0mm in 0.1mm units) */
+    hdr[46] = 0x9a; hdr[47] = 0x0b;   /* SHORT: 0x0b9a = 2970 (297.0mm in 0.1mm units) */
 
     /* XOR checksum over bytes 0-62 → byte 63 */
     lhplh_xor_checksum(hdr, sizeof(hdr));
@@ -458,7 +465,7 @@ static void write_lhplh_sp(FILE *fp,
      *   DWORD[1] = page_width  (BE)
      *   DWORD[2] = page_height (BE)
      *   DWORD[3] = stripe_height (BE, typically 128)
-     *   DWORD[4] = MX (BE DWORD, e.g. 0x00000040 = 64)
+     *   DWORD[4] = MY:MX (BE DWORD, high WORD=MY=0x0800=2048, low WORD=MX=0x0040=64)
      */
     {
         unsigned char bie[LHPLH_BIE_HDR];
@@ -475,8 +482,8 @@ static void write_lhplh_sp(FILE *fp,
         bie[13] = (stripe_height >> 16) & 0xFF;
         bie[14] = (stripe_height >> 8) & 0xFF;
         bie[15] = (stripe_height >> 0) & 0xFF;
-        /* MX as big-endian DWORD (64 = 0x00000040) */
-        bie[16] = 0x00; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 64;
+        /* MY:MX as big-endian DWORD (0x08000040: MY=2048, MX=64) */
+        bie[16] = 0x08; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 0x40;
         fwrite(bie, 1, sizeof(bie), fp);
     }
 
@@ -509,9 +516,7 @@ static void write_lhplh_ep(FILE *fp)
     cmd[0] = 0x1b; cmd[1] = 'L'; cmd[2] = 'H'; cmd[3] = '@';
     cmd[4] = 'e'; cmd[5] = 'p';
 
-    /* End-of-page marker */
-    cmd[8] = 0x06;
-    cmd[15] = 0x80;
+    /* End-of-page: all zeros (matches Windows driver capture) */
 
     /* XOR checksum over bytes 0-62 → byte 63 */
     lhplh_xor_checksum(cmd, sizeof(cmd));
@@ -524,7 +529,8 @@ static void write_lhplh_ep(FILE *fp)
 static void halftone_line(const unsigned char *gray_in,
                           unsigned char       *bit_out,
                           unsigned             width,
-                          unsigned             y)
+                          unsigned             y,
+                          int                  negative_print)
 {
     unsigned col;
     unsigned byte_idx = 0;
@@ -533,8 +539,21 @@ static void halftone_line(const unsigned char *gray_in,
 
     for (col = 0; col < width; col++) {
         unsigned char v = gray_in[col];
+        /*
+         * NegativePrint (from PPD) inverts pixel values:
+         *   0 = white (originally black), 255 = black (originally white)
+         * So we use v > threshold for black pixels.
+         * With standard (non-inverted) input, use (255 - v) > threshold.
+         */
         unsigned char threshold = bayer8x8[y % 8][col % 8];
-        if ((255 - v) > threshold) {
+        /*
+         * NegativePrint (from PPD) inverts pixel values in CUPS raster:
+         *   0 = white (originally black), 255 = black (originally white)
+         * With NegativePrint:  v > threshold → black dot
+         * Without NegativePrint: (255 - v) > threshold → black dot
+         */
+        int is_black = negative_print ? (v > threshold) : ((255 - v) > threshold);
+        if (is_black) {
             byte_val |= (1 << bit_pos);
         }
         if (bit_pos == 0) {
@@ -562,11 +581,17 @@ static int write_page(FILE *fp, cups_raster_t *ras,
      * The original driver uses 4768 pixels at 600 DPI, but our PPD defines
      * cupsWidth=4760. Using the CUPS raster width ensures consistency between
      * the @sp header fields and the actual pixel data sent to the JBIG encoder.
+     *
+     * IMPORTANT: The @sp page_width field must be 5120 (the printer's physical
+     * line width at 600 DPI), NOT the CUPS raster width. The Windows driver
+     * always sends page_width=5120 regardless of actual content width.
+     * The JBIG data is padded to this width by the printer.
      */
     unsigned cups_width = header->cupsWidth;
     unsigned width      = cups_width;
     unsigned height     = header->cupsHeight;
     unsigned bytes_per_line = (width + 7) / 8;
+    unsigned lhplh_page_width = 5120;  /* Fixed: printer physical width at 600 DPI */
     int      duplex     = header->Duplex;
     int      resolution = (header->HWResolution[0] >= 1200) ? 1200 : 600;
 
@@ -598,12 +623,14 @@ static int write_page(FILE *fp, cups_raster_t *ras,
             }
         }
 
-        pjl_printf(fp, "@PJL SET DUPLEX=%s", duplex ? "ON" : "OFF");
         pjl_printf(fp, "@PJL SET MEDIASOURCE=%d", 0);
-        pjl_printf(fp, "@PJL SET RENDERMODE=GRAYSCALE");
-        pjl_printf(fp, "@PJL SET RESOLUTION=%d", resolution);
+        pjl_printf(fp, "@PJL SET DUPLEX=%s", duplex ? "ON" : "OFF");
+        pjl_printf(fp, "@PJL SET MDPXS=%d", 0);   /* Media Size X (0.1mm units, 0=default) */
         pjl_printf(fp, "@PJL SET BITSPERPIXEL=1");
         pjl_printf(fp, "@PJL SET COPIES=%d", copies);
+        pjl_printf(fp, "@PJL SET RESOLUTION=%d", resolution);
+        pjl_printf(fp, "@PJL SET RENDERMODE=GRAYSCALE");
+        pjl_printf(fp, "@PJL SET PCNT=%d", 1);     /* Page Count */
         pjl_printf(fp, "@PJL ENTER LANGUAGE=LHPL");
 
         /* ── LHPLH @sj (Job Setup) ── */
@@ -612,11 +639,12 @@ static int write_page(FILE *fp, cups_raster_t *ras,
 
     /* ── Halftone + JBIG compress ── */
     {
+        unsigned lhplh_bpl = (lhplh_page_width + 7) / 8;  /* 640 bytes for 5120 pixels */
         unsigned char *gray_line  = malloc(header->cupsBytesPerLine > cups_width + 8
                                             ? header->cupsBytesPerLine : cups_width + 8);
-        unsigned char *prev_line  = calloc(bytes_per_line, 1);
-        unsigned char *prev2_line = calloc(bytes_per_line, 1);
-        unsigned char *cur_line   = calloc(bytes_per_line, 1);
+        unsigned char *prev_line  = calloc(lhplh_bpl, 1);
+        unsigned char *prev2_line = calloc(lhplh_bpl, 1);
+        unsigned char *cur_line   = calloc(lhplh_bpl, 1);
         jbig_out_t     jbig_out   = { NULL, 0, 0 };
         struct jbg85_enc_state jbig_state;
         unsigned y;
@@ -629,12 +657,15 @@ static int write_page(FILE *fp, cups_raster_t *ras,
 
         /*
          * JBIG T.85 encoder parameters (matching original driver):
+         *   width = 5120 (printer physical line width at 600 DPI)
          *   MX = 64 (NOT 127)
          *   options = JBG_TPBON only (NO JBG_VLENGTH!)
-         * The original driver uses MX=64 and no VLENGTH.
+         * The Windows driver always uses width=5120 for the JBIG encoder,
+         * regardless of the actual content width. The printer expects
+         * 5120-pixel-wide lines in the JBIG data.
          */
-        jbg85_enc_init(&jbig_state, width, height, jbig_data_out, &jbig_out);
-        jbg85_enc_options(&jbig_state, JBG_TPBON, 0, 64);
+        jbg85_enc_init(&jbig_state, lhplh_page_width, height, jbig_data_out, &jbig_out);
+        jbg85_enc_options(&jbig_state, 0, 0, 64);  /* TPBON disabled — test */
 
         for (y = 0; y < height; y++) {
             if (!ras_read_pixels(ras, gray_line, header->cupsBytesPerLine)) {
@@ -643,7 +674,8 @@ static int write_page(FILE *fp, cups_raster_t *ras,
             }
 
             /* Convert RGB (3 bytes/pixel) to grayscale if needed */
-            if (header->cupsColorSpace == CUPS_CSPACE_RGB) {
+            if (header->cupsColorSpace == CUPS_CSPACE_RGB ||
+                header->cupsColorSpace == CUPS_CSPACE_RGB2) {
                 unsigned i;
                 for (i = 0; i < cups_width; i++) {
                     unsigned char r = gray_line[i * 3];
@@ -654,13 +686,21 @@ static int write_page(FILE *fp, cups_raster_t *ras,
             }
 
             /*
-             * Crop to printable area: take only the first 'width' pixels
-             * from the CUPS raster line (which may be wider).
-             * width = cups_width, so the data is already the correct size.
-             * For 1200 DPI, CUPS produces a raster with 2× horizontal pixels,
-             * so cupsWidth is already 2× the 600 DPI value — no expansion needed.
+             * Halftone the CUPS raster line to 1-bit, then pad to
+             * lhplh_page_width (5120 pixels). The Windows driver sends
+             * 5120-pixel-wide lines to the printer; the content area
+             * (4760 pixels) is left-aligned, and the remaining 360 pixels
+             * are zero-filled (white).
              */
-            halftone_line(gray_line, cur_line, width, y);
+            memset(cur_line, 0, lhplh_bpl);  /* Zero-fill entire line (white) */
+            halftone_line(gray_line, cur_line, width, y, header->NegativePrint);
+            if (y < 3) {
+                fprintf(stderr, "DEBUG: LINE %u gray[0..9]=%d %d %d %d %d %d %d %d %d %d cur[0]=0x%02x NP=%u\n",
+                        y,
+                        gray_line[0], gray_line[1], gray_line[2], gray_line[3], gray_line[4],
+                        gray_line[5], gray_line[6], gray_line[7], gray_line[8], gray_line[9],
+                        cur_line[0], header->NegativePrint);
+            }
             jbg85_enc_lineout(&jbig_state, cur_line, prev_line, prev2_line);
             unsigned char *tmp = prev2_line;
             prev2_line = prev_line;
@@ -668,23 +708,37 @@ static int write_page(FILE *fp, cups_raster_t *ras,
             cur_line   = tmp;
         }
         /*
-         * Terminate the JBIG stream with SDRST (0xFF 0x03) to match the
-         * original driver's termination marker. The original driver uses
-         * SDRST at the end of the last stripe. Using ABORT (0xFF 0x04)
-         * from jbg85_enc_abort() is not a valid page termination and may
-         * cause the printer to reject the data.
+         * The jbig85 encoder outputs SDNORM (0xFF 0x02) at the end of each
+         * stripe, but the Windows driver uses SDRST (0xFF 0x03) instead.
+         * Replace all SDNORM markers with SDRST in the JBIG stream so the
+         * printer can decode the data correctly.
          *
-         * Note: jbg85_enc_newlen() is a no-op when VLENGTH is not set,
-         * so we manually append the SDRST marker.
+         * Note: we must NOT replace 0xFF 0x00 (escaped 0xFF byte in data)
+         * — only the SDNORM marker (0xFF 0x02) should become SDRST.
          */
         {
-            unsigned char sdrst[2] = { 0xff, 0x03 };  /* MARKER_ESC + MARKER_SDRST */
-            jbig_data_out(sdrst, 2, &jbig_out);
+            size_t j;
+            for (j = 0; j + 1 < jbig_out.len; j++) {
+                if (jbig_out.buf[j] == 0xff && jbig_out.buf[j + 1] == 0x02) {
+                    jbig_out.buf[j + 1] = 0x03;  /* SDNORM → SDRST */
+                }
+            }
         }
 
         /* ── LHPLH @sp (Page Data) ── */
-        write_lhplh_sp(fp, width, y, resolution,
-                       jbig_out.buf, jbig_out.len);
+        /*
+         * The jbig85 encoder outputs a 20-byte BIE header at the start of
+         * the stream, but the LHPLH protocol does NOT include this header —
+         * the JBIG parameters are already embedded in the @sp header
+         * (bytes 64-83). The Windows driver also omits the BIE header.
+         * Skip the first 20 bytes of the jbig85 output.
+         */
+        {
+            size_t jbig_start = 20;  /* skip BIE header */
+            size_t jbig_len   = jbig_out.len > 20 ? jbig_out.len - 20 : 0;
+            write_lhplh_sp(fp, lhplh_page_width, y, resolution,
+                           jbig_out.buf + jbig_start, jbig_len);
+        }
 
         fprintf(stderr, "INFO: page %d %ux%u @ %ddpi, JBIG %zu bytes\n",
                 page_num, width, y, resolution, jbig_out.len);
@@ -697,7 +751,7 @@ static int write_page(FILE *fp, cups_raster_t *ras,
     write_lhplh_ep(fp);
 
     /* ── PJL footer ── */
-    pjl_printf(fp, "@PJL EOJ");
+    pjl_printf(fp, "\x1b%%-12345X@PJL EOJ");
 
     return 0;
 }
@@ -747,11 +801,17 @@ int main(int argc, char *argv[])
             copies = header.NumCopies;
 
         /* Convert RGB to grayscale in the header if needed */
-        if (header.cupsColorSpace == CUPS_CSPACE_RGB) {
-            fprintf(stderr, "WARNING: RGB input, converting to gray (3bpp→8bpp)\n");
+        if (header.cupsColorSpace == CUPS_CSPACE_RGB ||
+            header.cupsColorSpace == CUPS_CSPACE_RGB2) {
+            fprintf(stderr, "WARNING: RGB input (cspace=%d), converting to gray\n",
+                    header.cupsColorSpace);
             header.cupsColorSpace = CUPS_CSPACE_W;
             header.cupsBitsPerPixel = 8;
             header.cupsBytesPerLine = header.cupsWidth * 3;
+        }
+        /* Convert PWG gray to CUPS gray */
+        if (header.cupsColorSpace == CUPS_CSPACE_W2) {
+            header.cupsColorSpace = CUPS_CSPACE_W;
         }
 
         page++;
