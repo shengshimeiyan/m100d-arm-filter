@@ -630,8 +630,20 @@ static int write_page(FILE *fp, cups_raster_t *ras,
             prev_line  = cur_line;
             cur_line   = tmp;
         }
-        jbg85_enc_newlen(&jbig_state, y);
-        jbg85_enc_abort(&jbig_state);
+        /*
+         * Terminate the JBIG stream with SDNORM (0xFF 0x02) instead of
+         * the default ABORT marker (0xFF 0x04) from jbg85_enc_abort().
+         * The original driver uses SDRST (0xFF 0x03) or SDNORM to properly
+         * terminate the last stripe — ABORT is not a valid page termination
+         * and may cause the printer to reject the data.
+         *
+         * Note: jbg85_enc_newlen() is a no-op when VLENGTH is not set,
+         * so we manually append the SDNORM marker.
+         */
+        {
+            unsigned char sdnorm[2] = { 0xff, 0x02 };  /* MARKER_ESC + MARKER_SDNORM */
+            jbig_data_out(sdnorm, 2, &jbig_out);
+        }
 
         /* ── LHPLH @sp (Page Data) ── */
         write_lhplh_sp(fp, width, y, resolution,
