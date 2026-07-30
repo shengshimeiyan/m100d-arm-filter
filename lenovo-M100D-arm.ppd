@@ -10,7 +10,7 @@
 *PSVersion: "(3015.103) 1"
 *ShortNickName: "Lenovo M100D (ARM)"
 *ModelName: "Lenovo M100D ARM"
-*NickName: "Lenovo M100D ARM v1.0 (open-source filter)"
+*NickName: "Lenovo M100D ARM v2.0 (open-source filter)"
 *cupsFilter: "application/vnd.cups-raster 50 rastertolhplh"
 
 *% == Device Identification ==
@@ -108,8 +108,8 @@
 *OrderDependency: 31 AnySetup *DrvDuplex
 *DefaultDrvDuplex: None
 *DrvDuplex None/1 Sided Print: ""
-*DrvDuplex DrvDuplexNoTumble/Flip on Long Edge: "<</DrvDuplex true /Tumble false>>setpagedevice"
-*DrvDuplex DrvDuplexTumble/Flip on Short Edge: "<</DrvDuplex true /Tumble true>>setpagedevice"
+*DrvDuplex DrvDuplexNoTumble/Flip on Long Edge: "<</Duplex true /Tumble false>>setpagedevice"
+*DrvDuplex DrvDuplexTumble/Flip on Short Edge: "<</Duplex true /Tumble true>>setpagedevice"
 *CloseUI: *DrvDuplex
 
 *% == Media Type ==
