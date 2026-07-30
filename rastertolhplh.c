@@ -341,20 +341,17 @@ static void write_lhplh_sj(FILE *fp, int copies)
  *
  * Structure (from original driver capture):
  *   Bytes 0-5:    1b 4c 48 40 73 70  (ESC LH @sp)
- *   Bytes 6-63:   @sp header (little-endian 16-bit fields):
- *     SHORT[0] = 0x0100 (page type/flags, big-endian: 0x0001)
- *     SHORT[1] = page_width (LE, e.g. 4768 = 0x12a0)
- *     SHORT[2] = 0
- *     SHORT[3] = page_height (LE, e.g. 100 = 0x0064)
- *     SHORT[4] = 0
- *     SHORT[5] = uncompressed_size (LE, e.g. 59600 = 0xe8d0)
- *     SHORT[6] = 0
- *     SHORT[7] = compressed_size (LE, low 16 bits)
- *     SHORT[8] = 0
- *     SHORT[9] = compressed_size (LE, repeated)
- *     SHORT[10-17] = 0 (reserved)
- *     SHORT[18] = resolution (LE, e.g. 600 = 0x0258)
- *     SHORT[19] = unknown (e.g. 0x0833)
+ *   Bytes 6-63:   @sp header (mixed 16-bit + 32-bit little-endian):
+ *     SHORT at offset 6  = 0x0100 (page type/flags)
+ *     DWORD at offset 8  = page_width (32-bit LE, e.g. 4768)
+ *     DWORD at offset 12 = page_height (32-bit LE, e.g. 6818)
+ *     DWORD at offset 16 = uncompressed_size (32-bit LE, e.g. 4063528)
+ *     DWORD at offset 20 = compressed_size (32-bit LE)
+ *     DWORD at offset 24 = compressed_size2 (32-bit LE, same as above)
+ *     DWORD at offset 28-41 = reserved (zeros)
+ *     SHORT at offset 42 = resolution (16-bit LE, e.g. 600)
+ *     SHORT at offset 44 = 0x0833 (printer-specific constant)
+ *     SHORT at offset 46 = 0x0b9a (printer-specific constant)
  *   Byte 63: XOR checksum of bytes 0-62
  *
  *   After the 64-byte header:
