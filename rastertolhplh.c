@@ -39,9 +39,11 @@
 #define LHPLH_HDR_SIZE   64    /* @sp header portion (includes XOR checksum) */
 #define LHPLH_BIE_HDR    20    /* JBIG parameters header inside @sp */
 
-/* Printable area width at 600 DPI (matches original driver) */
+/* Original driver printable area width at 600 DPI (for reference only) */
 #define PRINTABLE_WIDTH_600  4768   /* 4768 pixels = 201.8mm ≈ A4 printable width */
 #define PRINTABLE_WIDTH_1200 9536   /* 2× for 1200 DPI */
+/* NOTE: We now use cupsWidth from the CUPS raster header instead of
+ * hardcoding these values, so the filter adapts to the PPD configuration. */
 
 /* CUPS raster sync words */
 #define CUPS_RASTER_SYNC    0x52615333   /* "RaS3" v2 */
@@ -527,16 +529,15 @@ static int write_page(FILE *fp, cups_raster_t *ras,
                       int page_num, int copies)
 {
     /*
-     * Crop to printable area width (matches original driver).
-     * Original driver uses 4768 pixels at 600 DPI, not the full page width.
+     * Use the CUPS raster width from the page header as the printable area.
+     * The original driver uses 4768 pixels at 600 DPI, but our PPD defines
+     * cupsWidth=4760. Using the CUPS raster width ensures consistency between
+     * the @sp header fields and the actual pixel data sent to the JBIG encoder.
      */
-    unsigned printable_width = (header->HWResolution[0] >= 1200)
-                                ? PRINTABLE_WIDTH_1200
-                                : PRINTABLE_WIDTH_600;
-    unsigned width      = printable_width;
+    unsigned cups_width = header->cupsWidth;
+    unsigned width      = cups_width;
     unsigned height     = header->cupsHeight;
     unsigned bytes_per_line = (width + 7) / 8;
-    unsigned cups_width = header->cupsWidth;
     int      duplex     = header->Duplex;
     int      resolution = (header->HWResolution[0] >= 1200) ? 1200 : 600;
 
@@ -631,18 +632,18 @@ static int write_page(FILE *fp, cups_raster_t *ras,
             cur_line   = tmp;
         }
         /*
-         * Terminate the JBIG stream with SDNORM (0xFF 0x02) instead of
-         * the default ABORT marker (0xFF 0x04) from jbg85_enc_abort().
-         * The original driver uses SDRST (0xFF 0x03) or SDNORM to properly
-         * terminate the last stripe — ABORT is not a valid page termination
-         * and may cause the printer to reject the data.
+         * Terminate the JBIG stream with SDRST (0xFF 0x03) to match the
+         * original driver's termination marker. The original driver uses
+         * SDRST at the end of the last stripe. Using ABORT (0xFF 0x04)
+         * from jbg85_enc_abort() is not a valid page termination and may
+         * cause the printer to reject the data.
          *
          * Note: jbg85_enc_newlen() is a no-op when VLENGTH is not set,
-         * so we manually append the SDNORM marker.
+         * so we manually append the SDRST marker.
          */
         {
-            unsigned char sdnorm[2] = { 0xff, 0x02 };  /* MARKER_ESC + MARKER_SDNORM */
-            jbig_data_out(sdnorm, 2, &jbig_out);
+            unsigned char sdrst[2] = { 0xff, 0x03 };  /* MARKER_ESC + MARKER_SDRST */
+            jbig_data_out(sdrst, 2, &jbig_out);
         }
 
         /* ── LHPLH @sp (Page Data) ── */
