@@ -12,6 +12,7 @@
 *ModelName: "Lenovo M100D ARM"
 *NickName: "Lenovo M100D ARM v2.0 (open-source filter)"
 *cupsFilter: "application/vnd.cups-raster 50 rastertolhplh"
+*cupsFilter2: "image/pwg-raster 50 rastertolhplh"
 
 *% == Device Identification ==
 *1284DeviceID: "MFG:Lenovo;MDL:M100D;DES:Lenovo M100D;CMD:GDI;CLS:PRINTER;"

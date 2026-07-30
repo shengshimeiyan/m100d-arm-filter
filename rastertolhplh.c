@@ -49,6 +49,8 @@
 #define CUPS_RASTER_SYNC    0x52615333   /* "RaS3" v2 */
 #define CUPS_RASTER_SYNCv1  0x52615374   /* "RaSt" v1 */
 #define CUPS_RASTER_REVSYNC 0x33536152   /* "3SaR" reversed v2 */
+#define CUPS_RASTER_PWG     0x52615332   /* "RaS2" PWG Raster */
+#define CUPS_RASTER_REVPWG  0x32536152   /* "2SaR" reversed PWG */
 
 /* CUPS color spaces (subset we care about) */
 #define CUPS_CSPACE_W       0
@@ -213,10 +215,26 @@ static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
     if (!ras_read(ras, &sync, 4)) return 0;
 
     int swapped = 0;
+    int is_pwg = 0;
     if (sync == CUPS_RASTER_SYNC) {
         swapped = 0;
     } else if (sync == CUPS_RASTER_REVSYNC) {
         swapped = 1;
+    } else if (sync == CUPS_RASTER_PWG) {
+        /* PWG Raster (RaS2) on big-endian machines.
+         * Despite the PWG spec saying header fields are big-endian,
+         * CUPS's pdftoraster/gstoraster output PWG Raster with
+         * native-endian header fields (just like CUPS Raster v2).
+         * The only difference is the sync word and the PwgRaster marker.
+         * So swapped = 0 (same as RaS3 on big-endian). */
+        swapped = 0;
+        is_pwg = 1;
+    } else if (sync == CUPS_RASTER_REVPWG) {
+        /* PWG Raster (RaS2) on little-endian machines.
+         * CUPS outputs native-endian header fields regardless of
+         * the PWG spec, so swapped = 0 (native byte order). */
+        swapped = 0;
+        is_pwg = 1;
     } else if (sync == CUPS_RASTER_SYNCv1) {
         /* v1 header is only 296 bytes, but we read 1796 — would misalign
          * all subsequent page data. Reject rather than produce garbage. */
@@ -230,6 +248,13 @@ static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
     /* Copy sync word into raw buffer, then read the rest of the header */
     memcpy(raw, &sync, 4);
     if (!ras_read(ras, raw + 4, CUPS_HEADER_SIZE - 4)) return 0;
+
+    /* For PWG Raster, the PwgRaster\0 marker at bytes 4-13 overwrites
+     * the MediaClass field — but we don't use MediaClass, so no fixup
+     * needed. The other header fields are at the same offsets. */
+    if (is_pwg) {
+        fprintf(stderr, "DEBUG: PWG Raster input detected (RaS2)\n");
+    }
 
     /* Parse the header fields we need */
     parse_header(raw, swapped, h);
