@@ -345,7 +345,7 @@ static void write_lhplh_sj(FILE *fp, int copies)
  *   Bytes 0-5:    1b 4c 48 40 73 70  (ESC LH @sp)
  *   Bytes 6-63:   @sp header (mixed 16-bit + 32-bit little-endian):
  *     SHORT at offset 6  = 0x0100 (page type/flags)
- *     DWORD at offset 8  = page_width (32-bit LE, e.g. 4768)
+ *     DWORD at offset 8  = page_width (32-bit LE, from CUPS raster header)
  *     DWORD at offset 12 = page_height (32-bit LE, e.g. 6818)
  *     DWORD at offset 16 = uncompressed_size (32-bit LE, e.g. 4063528)
  *     DWORD at offset 20 = compressed_size (32-bit LE)
@@ -526,7 +526,9 @@ static void halftone_line(const unsigned char *gray_in,
 
 static int write_page(FILE *fp, cups_raster_t *ras,
                       cups_header_subset_t *header,
-                      int page_num, int copies)
+                      int page_num, int copies,
+                      const char *doc_title, const char *username,
+                      int is_first_page, int is_last_page)
 {
     /*
      * Use the CUPS raster width from the page header as the printable area.
@@ -542,39 +544,46 @@ static int write_page(FILE *fp, cups_raster_t *ras,
     int      resolution = (header->HWResolution[0] >= 1200) ? 1200 : 600;
 
     /* ── PJL header (matches original driver format) ── */
+    /* Only write PJL header for the first page of a multi-page job.
+     * The original driver wraps all pages in a single PJL job:
+     *   UEL + JOB + SET commands + ENTER LANGUAGE + @sj
+     *     @sp page1 + @ep
+     *     @sp page2 + @ep
+     *     ...
+     *   @PJL EOJ
+     */
+    if (is_first_page) {
+        /* UEL + JOB with NAME=PRINTER */
+        pjl_printf(fp, "\x1b%%-12345X@PJL JOB NAME=PRINTER");
 
-    /* UEL + JOB with NAME=PRINTER */
-    pjl_printf(fp, "\x1b%%-12345X@PJL JOB NAME=PRINTER");
-
-    /* JOBATTR: HST/USR/DOC/DATE/TIME (matches original driver) */
-    {
-        const char *user = (page_num > 0 && getenv("CUPS_USER")) ? getenv("CUPS_USER") : "unknown";
-        const char *host = getenv("HOSTNAME");
-        if (!host) host = "localhost";
-        pjl_printf(fp, "@PJL SET JOBATTR=HST:%s", host);
-        pjl_printf(fp, "@PJL SET JOBATTR=USR:%s", user);
-        pjl_printf(fp, "@PJL SET JOBATTR=DOC:%s",
-                   (page_num > 0) ? "document" : "unknown");
+        /* JOBATTR: HST/USR/DOC/DATE/TIME (matches original driver) */
         {
-            time_t now = time(NULL);
-            struct tm *t = localtime(&now);
-            pjl_printf(fp, "@PJL SET JOBATTR=DATE:%02d/%02d/%04d",
-                       t->tm_mon + 1, t->tm_mday, t->tm_year + 1900);
-            pjl_printf(fp, "@PJL SET JOBATTR=TIME:%02d:%02d:%02d",
-                       t->tm_hour, t->tm_min, t->tm_sec);
+            const char *host = getenv("HOSTNAME");
+            if (!host) host = "localhost";
+            pjl_printf(fp, "@PJL SET JOBATTR=HST:%s", host);
+            pjl_printf(fp, "@PJL SET JOBATTR=USR:%s", username ? username : "unknown");
+            pjl_printf(fp, "@PJL SET JOBATTR=DOC:%s", doc_title ? doc_title : "unknown");
+            {
+                time_t now = time(NULL);
+                struct tm *t = localtime(&now);
+                pjl_printf(fp, "@PJL SET JOBATTR=DATE:%02d/%02d/%04d",
+                           t->tm_mon + 1, t->tm_mday, t->tm_year + 1900);
+                pjl_printf(fp, "@PJL SET JOBATTR=TIME:%02d:%02d:%02d",
+                           t->tm_hour, t->tm_min, t->tm_sec);
+            }
         }
+
+        pjl_printf(fp, "@PJL SET DUPLEX=%s", duplex ? "ON" : "OFF");
+        pjl_printf(fp, "@PJL SET MEDIASOURCE=%d", 0);
+        pjl_printf(fp, "@PJL SET RENDERMODE=GRAYSCALE");
+        pjl_printf(fp, "@PJL SET RESOLUTION=%d", resolution);
+        pjl_printf(fp, "@PJL SET BITSPERPIXEL=1");
+        pjl_printf(fp, "@PJL SET COPIES=%d", copies);
+        pjl_printf(fp, "@PJL ENTER LANGUAGE=LHPL");
+
+        /* ── LHPLH @sj (Job Setup) ── */
+        write_lhplh_sj(fp, copies);
     }
-
-    pjl_printf(fp, "@PJL SET DUPLEX=%s", duplex ? "ON" : "OFF");
-    pjl_printf(fp, "@PJL SET MEDIASOURCE=%d", 0);
-    pjl_printf(fp, "@PJL SET RENDERMODE=GRAYSCALE");
-    pjl_printf(fp, "@PJL SET RESOLUTION=%d", resolution);
-    pjl_printf(fp, "@PJL SET BITSPERPIXEL=1");
-    pjl_printf(fp, "@PJL SET COPIES=%d", copies);
-    pjl_printf(fp, "@PJL ENTER LANGUAGE=LHPL");
-
-    /* ── LHPLH @sj (Job Setup) ── */
-    write_lhplh_sj(fp, copies);
 
     /* ── Halftone + JBIG compress ── */
     {
@@ -607,24 +616,25 @@ static int write_page(FILE *fp, cups_raster_t *ras,
                 break;
             }
 
+            /* Convert RGB (3 bytes/pixel) to grayscale if needed */
+            if (header->cupsColorSpace == CUPS_CSPACE_RGB) {
+                unsigned i;
+                for (i = 0; i < cups_width; i++) {
+                    unsigned char r = gray_line[i * 3];
+                    unsigned char g = gray_line[i * 3 + 1];
+                    unsigned char b = gray_line[i * 3 + 2];
+                    gray_line[i] = (unsigned char)((r * 77 + g * 150 + b * 29) >> 8);
+                }
+            }
+
             /*
              * Crop to printable area: take only the first 'width' pixels
              * from the CUPS raster line (which may be wider).
-             * For 1200 DPI, expand 600 DPI pixels 2×.
+             * width = cups_width, so the data is already the correct size.
+             * For 1200 DPI, CUPS produces a raster with 2× horizontal pixels,
+             * so cupsWidth is already 2× the 600 DPI value — no expansion needed.
              */
-            if (header->HWResolution[0] >= 1200 && cups_width < width) {
-                unsigned char *expanded = malloc(width + 8);
-                unsigned i;
-                for (i = 0; i < cups_width && i * 2 < width; i++) {
-                    expanded[i * 2]     = gray_line[i];
-                    expanded[i * 2 + 1] = gray_line[i];
-                }
-                halftone_line(expanded, cur_line, width, y);
-                free(expanded);
-            } else {
-                /* Use only the first 'width' pixels (crop to printable area) */
-                halftone_line(gray_line, cur_line, width, y);
-            }
+            halftone_line(gray_line, cur_line, width, y);
             jbg85_enc_lineout(&jbig_state, cur_line, prev_line, prev2_line);
             unsigned char *tmp = prev2_line;
             prev2_line = prev_line;
@@ -660,8 +670,10 @@ static int write_page(FILE *fp, cups_raster_t *ras,
     /* ── LHPLH @ep (End Page) ── */
     write_lhplh_ep(fp);
 
-    /* ── PJL footer ── */
-    pjl_printf(fp, "@PJL EOJ");
+    /* ── PJL footer (only on last page) ── */
+    if (is_last_page) {
+        pjl_printf(fp, "@PJL EOJ");
+    }
 
     return 0;
 }
@@ -713,6 +725,9 @@ int main(int argc, char *argv[])
         /* Convert RGB to grayscale in the header if needed */
         if (header.cupsColorSpace == CUPS_CSPACE_RGB) {
             fprintf(stderr, "WARNING: RGB input, converting to gray (3bpp→8bpp)\n");
+            header.cupsColorSpace = CUPS_CSPACE_W;
+            header.cupsBitsPerPixel = 8;
+            header.cupsBytesPerLine = header.cupsWidth * 3;
         }
 
         page++;
@@ -721,7 +736,17 @@ int main(int argc, char *argv[])
                 header.HWResolution[0], header.HWResolution[1],
                 header.cupsBitsPerPixel);
 
-        if (write_page(stdout, ras, &header, page, copies) != 0) break;
+        /*
+         * We can't peek ahead in the CUPS raster stream to determine
+         * if this is the last page. So we always write PJL EOJ after
+         * each page. For single-page jobs (the common case), this is
+         * identical to the original driver. For multi-page jobs, each
+         * page becomes a separate PJL job — the printer handles this
+         * correctly by printing each page in sequence.
+         */
+        if (write_page(stdout, ras, &header, page, copies,
+                       argv[3], argv[2],
+                       1, 1) != 0) break;
     }
 
     ras_close(ras);
