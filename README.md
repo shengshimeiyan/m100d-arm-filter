@@ -170,7 +170,7 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 │  │   ├─ DWORD[2] = page_height (BE)               │
 │  │   ├─ DWORD[3] = L0=128 (stripe height, BE)     │
 │  │   └─ DWORD[4] = MX=64 (BE DWORD, 0x00000040)   │
-│  └─ JBIG T.85 压缩数据 (无 BIE 头包装)             │
+│  └─ JBIG T.85 压缩数据 (SDRST 终止, 无 BIE 头包装) │
 ├──────────────────────────────────────────────────┤
 │  LHPLH @ep 命令帧 (64 bytes)                      │
 │  ├─ 前缀: 1b 4c 48 40 65 70 (ESC LH @ep)         │
@@ -191,8 +191,9 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 | @sp 头部字段 | 偏移 8+ 为 **32-bit LE DWORD**（非 16-bit） |
 | @sp JBIG 参数头 | 自定义 LHPLH 格式，5 个 big-endian DWORD（非标准 BIE） |
 | JBIG 压缩参数 | MX=64, L0=128, TPBON only (无 VLENGTH) |
+| JBIG 终止标记 | SDRST (0xFF 0x03)，匹配原厂驱动 |
 | XOR 校验 | `byte[63] = bytes[0..62]` 逐字节异或 |
-| 打印区域宽度 | 4768 像素 @ 600dpi (≈201.8mm) |
+| 打印区域宽度 | 从 CUPS Raster 头部读取（PPD 定义 cupsWidth=4760） |
 
 ## 资源占用
 
@@ -222,7 +223,7 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 |------|---------|---------|
 | 打印机无反应 | USB 权限问题 | `lsusb` 检查，确认 udev 规则 |
 | 输出乱码/全黑 | JBIG 参数不对 | 调整源码中 L0、MX 值 |
-| 打印一半停止 | ABORT 标记问题 | 可能需要改用 SDNORM 终止 |
+| 打印一半停止 | ABORT 标记问题 | 已修复为 SDRST (0xFF 0x03) 终止 |
 | CUPS 报错 | 查看日志 | `cat /var/log/cups/error_log \| tail -50` |
 | 找不到打印机 | CUPS 未识别 | `sudo lpinfo -l -v` 检查 USB URI |
 
@@ -232,10 +233,11 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 |----|----|
 | 协议 | GDI（IEEE 1284 Device ID: CMD:GDI） |
 | 页面语言 | LHPLH（`@PJL ENTER LANGUAGE=LHPL`） |
-| 压缩 | JBIG-KIT 2.1 T.85（GPLv2+），MX=64, L0=128 |
+| 压缩 | JBIG-KIT 2.1 T.85（GPLv2+），MX=64, L0=128, SDRST 终止 |
 | 命令帧格式 | ESC LH @sj/@sp/@ep，64 字节固定头 + XOR 校验 |
 | @sp 头部字段 | 32-bit LE DWORD（page_width/height/sizes） |
 | @sp JBIG 子头 | 自定义 LHPLH 格式，5 个 BE DWORD（非标准 BIE） |
+| 页面宽度 | 从 CUPS Raster 头部读取（非硬编码） |
 | PJL 行尾 | `\r\n`（0x0D 0x0A） |
 | CUPS Raster 读取器 | 内嵌（无需 libcups 依赖） |
 | 链接方式 | `-lm -static`，零运行时 `.so` 依赖 |
@@ -248,8 +250,10 @@ aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
 4. 在 x86-64 机器上安装原厂驱动，通过 CUPS `file:/` 后端抓包获取完整协议输出
 5. 识别 LHPLH 命令帧格式（@sj/@sp/@ep + XOR 校验）、JBIG T.85 压缩参数（MX=64, L0=128）
 6. 确认 @sp 头部字段为 **32-bit LE**（非 16-bit）——原厂小测试页值恰好能存入 16-bit，全页输出才暴露
-7. 编写独立 CUPS 过滤器，内嵌 CUPS Raster 读取器
-8. 三种方法测试验证：直接运行 ✅ / 与原厂对比 ✅ / CUPS 完整流程 ✅
+7. 确认 JBIG 终止标记为 **SDRST (0xFF 0x03)**——原厂使用 SDRST，ABORT (0xFF 0x04) 非有效终止
+8. 页面宽度从 CUPS Raster 头部动态读取——不再硬编码 4768，适配 PPD 配置
+9. 编写独立 CUPS 过滤器，内嵌 CUPS Raster 读取器
+10. 三种方法测试验证：直接运行 ✅ / 与原厂对比 ✅ / CUPS 完整流程 ✅
 
 ## 许可证
 
@@ -336,7 +340,7 @@ Lenovo M100D, M100DNA, L100D, L100DW, M1520D, M1688DW (all share the same LHPLH 
 │  │   ├─ DWORD[2] = page_height (BE)               │
 │  │   ├─ DWORD[3] = L0=128 (stripe height, BE)     │
 │  │   └─ DWORD[4] = MX=64 (BE DWORD, 0x00000040)   │
-│  └─ JBIG T.85 Compressed Data (no BIE wrapper)    │
+│  └─ JBIG T.85 Compressed Data (SDRST termination) │
 ├──────────────────────────────────────────────────┤
 │  LHPLH @ep Command Frame (64 bytes)               │
 │  ├─ Prefix: 1b 4c 48 40 65 70 (ESC LH @ep)       │
@@ -357,8 +361,9 @@ Lenovo M100D, M100DNA, L100D, L100DW, M1520D, M1688DW (all share the same LHPLH 
 | @sp header fields | 32-bit LE DWORDs at offset 8+ (not 16-bit) |
 | @sp JBIG sub-header | Custom LHPLH format, 5 BE DWORDs (not standard BIE) |
 | JBIG compression params | MX=64, L0=128, TPBON only (no VLENGTH) |
+| JBIG termination marker | SDRST (0xFF 0x03), matching original driver |
 | XOR checksum | `byte[63] = XOR of bytes[0..62]` |
-| Printable area width | 4768 pixels @ 600dpi (≈201.8mm) |
+| Printable area width | Read from CUPS Raster header (PPD cupsWidth=4760) |
 
 ## Testing
 
@@ -369,6 +374,8 @@ The filter has been verified through three independent methods against the origi
 | **Direct run** | Process CUPS Raster → analyze output structure | ✅ All checks pass |
 | **Original driver comparison** | Byte-by-byte comparison with `lnthr8zfilter.app` output | ✅ PJL/@sj/@ep/@sp headers match exactly |
 | **CUPS full pipeline** | Capture CUPS daemon output via `file:/` backend | ✅ Full print pipeline works |
+
+Verified items: PJL format ✅ · @sj/@sp/@ep command frames ✅ · XOR checksums ✅ · @sp 32-bit LE fields ✅ · JBIG params (L0=128, MX=64) ✅ · SDRST termination ✅ · @PJL EOJ ✅
 
 ## License
 
