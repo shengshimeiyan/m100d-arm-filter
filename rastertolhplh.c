@@ -373,7 +373,7 @@ static void write_lhplh_sp(FILE *fp,
 {
     unsigned char hdr[LHPLH_HDR_SIZE];
     unsigned uncompressed_size = (page_width / 8) * page_height;
-    unsigned stripe_height = (page_height <= 128) ? 128 : page_height;
+    unsigned stripe_height = 128;  /* L0 = 128, matches original driver (fixed) */
 
     memset(hdr, 0, sizeof(hdr));
 
@@ -381,35 +381,40 @@ static void write_lhplh_sp(FILE *fp,
     hdr[0] = 0x1b; hdr[1] = 'L'; hdr[2] = 'H'; hdr[3] = '@';
     hdr[4] = 's'; hdr[5] = 'p';
 
-    /* @sp header fields (little-endian 16-bit) */
-    hdr[6] = 0x00; hdr[7] = 0x01;   /* page type/flags (BE: 0x0001) */
-    /* page_width (LE 16-bit) */
+    /* @sp header fields (mixed 16-bit + 32-bit little-endian) */
+    hdr[6] = 0x00; hdr[7] = 0x01;   /* page type/flags (SHORT, LE: 0x0100) */
+    /* page_width (32-bit LE) */
     hdr[8]  = (page_width >> 0) & 0xFF;
     hdr[9]  = (page_width >> 8) & 0xFF;
-    /* SHORT[2] = 0 */
-    /* page_height (LE 16-bit) */
+    hdr[10] = (page_width >> 16) & 0xFF;
+    hdr[11] = (page_width >> 24) & 0xFF;
+    /* page_height (32-bit LE) */
     hdr[12] = (page_height >> 0) & 0xFF;
     hdr[13] = (page_height >> 8) & 0xFF;
-    /* SHORT[4] = 0 */
-    /* uncompressed_size (LE 16-bit) */
+    hdr[14] = (page_height >> 16) & 0xFF;
+    hdr[15] = (page_height >> 24) & 0xFF;
+    /* uncompressed_size (32-bit LE) */
     hdr[16] = (uncompressed_size >> 0) & 0xFF;
     hdr[17] = (uncompressed_size >> 8) & 0xFF;
-    /* SHORT[6] = 0 */
-    /* compressed_size (LE 16-bit) */
+    hdr[18] = (uncompressed_size >> 16) & 0xFF;
+    hdr[19] = (uncompressed_size >> 24) & 0xFF;
+    /* compressed_size (32-bit LE) */
     hdr[20] = (jbig_len >> 0) & 0xFF;
     hdr[21] = (jbig_len >> 8) & 0xFF;
-    /* SHORT[8] = 0 */
-    /* compressed_size repeated (LE 16-bit) */
+    hdr[22] = (jbig_len >> 16) & 0xFF;
+    hdr[23] = (jbig_len >> 24) & 0xFF;
+    /* compressed_size repeated (32-bit LE) */
     hdr[24] = (jbig_len >> 0) & 0xFF;
     hdr[25] = (jbig_len >> 8) & 0xFF;
-    /* SHORT[10-17] = 0 (reserved) */
-    /* resolution (LE 16-bit) */
+    hdr[26] = (jbig_len >> 16) & 0xFF;
+    hdr[27] = (jbig_len >> 24) & 0xFF;
+    /* DWORD[5-7] = 0 (reserved) */
+    /* resolution (16-bit LE, at offset 42) */
     hdr[42] = (resolution >> 0) & 0xFF;
     hdr[43] = (resolution >> 8) & 0xFF;
-    /* SHORT[19] = 0x0833 (printer-specific constant, matches original driver) */
-    hdr[44] = 0x33; hdr[45] = 0x08;
-    /* SHORT[20] = 0x0b9a (printer-specific constant, LE = 2970) */
-    hdr[46] = 0x9a; hdr[47] = 0x0b;
+    /* printer-specific constants (16-bit LE) */
+    hdr[44] = 0x33; hdr[45] = 0x08;   /* SHORT: 0x0833 = 2099 */
+    hdr[46] = 0x9a; hdr[47] = 0x0b;   /* SHORT: 0x0b9a = 2970 */
 
     /* XOR checksum over bytes 0-62 → byte 63 */
     lhplh_xor_checksum(hdr, sizeof(hdr));
