@@ -218,7 +218,10 @@ static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
     } else if (sync == CUPS_RASTER_REVSYNC) {
         swapped = 1;
     } else if (sync == CUPS_RASTER_SYNCv1) {
-        swapped = 0;
+        /* v1 header is only 296 bytes, but we read 1796 — would misalign
+         * all subsequent page data. Reject rather than produce garbage. */
+        fprintf(stderr, "ERROR: CUPS Raster v1 not supported (v2 required)\n");
+        return 0;
     } else {
         fprintf(stderr, "ERROR: not a CUPS raster file (sync=0x%08x)\n", sync);
         return 0;
@@ -371,7 +374,7 @@ static void write_lhplh_sp(FILE *fp,
                             const unsigned char *jbig_data, size_t jbig_len)
 {
     unsigned char hdr[LHPLH_HDR_SIZE];
-    unsigned uncompressed_size = (page_width / 8) * page_height;
+    unsigned uncompressed_size = ((page_width + 7) / 8) * page_height;
     unsigned stripe_height = 128;  /* L0 = 128, matches original driver (fixed) */
 
     memset(hdr, 0, sizeof(hdr));
