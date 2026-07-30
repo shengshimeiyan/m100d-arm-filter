@@ -6,6 +6,9 @@
  *
  * Only external dependency: JBIG-KIT 2.1 T.85 (compiled from source)
  *
+ * Output format matches the original proprietary driver (lnthr8zfilter.app):
+ *   PJL header → LHPLH command frames (@sj, @sp, @ep) → PJL EOJ
+ *
  * Build (native):
  *   gcc -O2 -o rastertolhplh rastertolhplh.c jbig85.c jbig_ar.c -lm
  *
@@ -27,15 +30,21 @@
 
 /* ── Constants ─────────────────────────────────────────────────────── */
 
-#define FILTER_VERSION   "1.0.1-arm64-standalone"
-#define PJL_SEPARATOR    512
+#define FILTER_VERSION   "2.0.0-arm64-standalone"
 #define MAX_PAGE_WIDTH   10000
 #define MAX_PAGE_HEIGHT  15000
 
+/* LHPLH command frame sizes */
+#define LHPLH_CMD_SIZE   64    /* @sj and @ep are fixed 64 bytes */
+#define LHPLH_HDR_SIZE   64    /* @sp header portion (includes XOR checksum) */
+#define LHPLH_BIE_HDR    20    /* JBIG parameters header inside @sp */
+
+/* Printable area width at 600 DPI (matches original driver) */
+#define PRINTABLE_WIDTH_600  4768   /* 4768 pixels = 201.8mm ≈ A4 printable width */
+#define PRINTABLE_WIDTH_1200 9536   /* 2× for 1200 DPI */
+
 /* CUPS raster sync words */
 #define CUPS_RASTER_SYNC    0x52615333   /* "RaS3" v2 */
-#define CUPS_RASTER_PWG    0x52615332   /* RaS2 PWG Raster */
-#define CUPS_RASTER_REVPWG  0x32536152   /* 2SaR reversed PWG */
 #define CUPS_RASTER_SYNCv1  0x52615374   /* "RaSt" v1 */
 #define CUPS_RASTER_REVSYNC 0x33536152   /* "3SaR" reversed v2 */
 
@@ -197,7 +206,6 @@ static int ras_read(cups_raster_t *ras, void *buf, size_t len)
 static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
 {
     unsigned sync;
-    int skip_pwg_marker = 0;
     unsigned char raw[CUPS_HEADER_SIZE];
 
     if (!ras_read(ras, &sync, 4)) return 0;
@@ -205,9 +213,6 @@ static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
     int swapped = 0;
     if (sync == CUPS_RASTER_SYNC) {
         swapped = 0;
-    } else if (sync == CUPS_RASTER_PWG || sync == CUPS_RASTER_REVPWG) {
-        swapped = 1;   /* PWG Raster header fields are big-endian */
-        skip_pwg_marker = 1;
     } else if (sync == CUPS_RASTER_REVSYNC) {
         swapped = 1;
     } else if (sync == CUPS_RASTER_SYNCv1) {
@@ -219,13 +224,6 @@ static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
 
     /* Copy sync word into raw buffer, then read the rest of the header */
     memcpy(raw, &sync, 4);
-    if (skip_pwg_marker) {
-        /* PWG Raster: "PwgRaster\0" marker occupies the first 10 bytes of
-         * the header fields (offset 4-13), but the rest of the header is
-         * identical to CUPS Raster v2. Just read the full 1792 bytes;
-         * the PwgRaster marker will overwrite unused fields like HWResolution.
-         */
-    }
     if (!ras_read(ras, raw + 4, CUPS_HEADER_SIZE - 4)) return 0;
 
     /* Parse the header fields we need */
@@ -287,19 +285,206 @@ static void pjl_printf(FILE *fp, const char *fmt, ...)
     fputs("\r\n", fp);
 }
 
-/* ── Media type mapping ────────────────────────────────────────────── */
+/* ── LHPLH command frame helpers ───────────────────────────────────── */
 
-static int cups_mediatype_to_pjl(int cups_media_type)
+/*
+ * Compute XOR checksum of all bytes in buf[0..len-2],
+ * store result in buf[len-1].
+ */
+static void lhplh_xor_checksum(unsigned char *buf, size_t len)
 {
-    switch (cups_media_type) {
-    case 0:  return 0;  /* Plain */
-    case 1:  return 1;  /* Recycled */
-    case 2:  return 2;  /* Thick */
-    case 3:  return 3;  /* Thin */
-    case 4:  return 4;  /* Label */
-    case 5:  return 5;  /* Envelope */
-    default: return 0;
+    unsigned char xor_val = 0;
+    size_t i;
+    for (i = 0; i < len - 1; i++)
+        xor_val ^= buf[i];
+    buf[len - 1] = xor_val;
+}
+
+/*
+ * Write an LHPLH @sj (Job Setup) command frame.
+ * Format: 64 bytes, XOR checksum at byte 63.
+ *
+ * Structure (from original driver capture):
+ *   Bytes 0-5:   1b 4c 48 40 73 6a  (ESC LH @sj)
+ *   Byte  6:     0x01 (version?)
+ *   Byte  7:     0x00 (flags?)
+ *   Byte  8:     copies (low byte)
+ *   Byte  9:     0x00
+ *   Bytes 10-62: padding (zeros)
+ *   Byte  63:    XOR checksum
+ */
+static void write_lhplh_sj(FILE *fp, int copies)
+{
+    unsigned char cmd[LHPLH_CMD_SIZE];
+    memset(cmd, 0, sizeof(cmd));
+
+    /* Prefix: ESC LH @sj */
+    cmd[0] = 0x1b; cmd[1] = 'L'; cmd[2] = 'H'; cmd[3] = '@';
+    cmd[4] = 's'; cmd[5] = 'j';
+
+    /* Version / flags */
+    cmd[6] = 0x01;
+    cmd[7] = 0x00;
+
+    /* Copies */
+    cmd[8] = (unsigned char)(copies & 0xFF);
+    cmd[9] = 0x00;
+
+    /* XOR checksum over bytes 0-62 → byte 63 */
+    lhplh_xor_checksum(cmd, sizeof(cmd));
+
+    fwrite(cmd, 1, sizeof(cmd), fp);
+}
+
+/*
+ * Write an LHPLH @sp (Page Data) command frame.
+ *
+ * Structure (from original driver capture):
+ *   Bytes 0-5:    1b 4c 48 40 73 70  (ESC LH @sp)
+ *   Bytes 6-63:   @sp header (little-endian 16-bit fields):
+ *     SHORT[0] = 0x0100 (page type/flags, big-endian: 0x0001)
+ *     SHORT[1] = page_width (LE, e.g. 4768 = 0x12a0)
+ *     SHORT[2] = 0
+ *     SHORT[3] = page_height (LE, e.g. 100 = 0x0064)
+ *     SHORT[4] = 0
+ *     SHORT[5] = uncompressed_size (LE, e.g. 59600 = 0xe8d0)
+ *     SHORT[6] = 0
+ *     SHORT[7] = compressed_size (LE, low 16 bits)
+ *     SHORT[8] = 0
+ *     SHORT[9] = compressed_size (LE, repeated)
+ *     SHORT[10-17] = 0 (reserved)
+ *     SHORT[18] = resolution (LE, e.g. 600 = 0x0258)
+ *     SHORT[19] = unknown (e.g. 0x0833)
+ *   Byte 63: XOR checksum of bytes 0-62
+ *
+ *   After the 64-byte header:
+ *   Bytes 64-83:  JBIG parameters header (big-endian, 20 bytes):
+ *     DWORD[0] = 0x00000100 (flags)
+ *     DWORD[1] = page_width (BE)
+ *     DWORD[2] = page_height (BE)
+ *     DWORD[3] = stripe_height (BE, e.g. 128)
+ *     DWORD[4] = 0x00000040 (MX=64)
+ *   Bytes 84+:   JBIG T.85 compressed data (no BIE header wrapper)
+ */
+static void write_lhplh_sp(FILE *fp,
+                            unsigned page_width, unsigned page_height,
+                            unsigned resolution,
+                            const unsigned char *jbig_data, size_t jbig_len)
+{
+    unsigned char hdr[LHPLH_HDR_SIZE];
+    unsigned uncompressed_size = (page_width / 8) * page_height;
+    unsigned stripe_height = (page_height <= 128) ? 128 : page_height;
+
+    memset(hdr, 0, sizeof(hdr));
+
+    /* Prefix: ESC LH @sp */
+    hdr[0] = 0x1b; hdr[1] = 'L'; hdr[2] = 'H'; hdr[3] = '@';
+    hdr[4] = 's'; hdr[5] = 'p';
+
+    /* @sp header fields (little-endian 16-bit) */
+    hdr[6] = 0x00; hdr[7] = 0x01;   /* page type/flags (BE: 0x0001) */
+    /* page_width (LE 16-bit) */
+    hdr[8]  = (page_width >> 0) & 0xFF;
+    hdr[9]  = (page_width >> 8) & 0xFF;
+    /* SHORT[2] = 0 */
+    /* page_height (LE 16-bit) */
+    hdr[12] = (page_height >> 0) & 0xFF;
+    hdr[13] = (page_height >> 8) & 0xFF;
+    /* SHORT[4] = 0 */
+    /* uncompressed_size (LE 16-bit) */
+    hdr[16] = (uncompressed_size >> 0) & 0xFF;
+    hdr[17] = (uncompressed_size >> 8) & 0xFF;
+    /* SHORT[6] = 0 */
+    /* compressed_size (LE 16-bit) */
+    hdr[20] = (jbig_len >> 0) & 0xFF;
+    hdr[21] = (jbig_len >> 8) & 0xFF;
+    /* SHORT[8] = 0 */
+    /* compressed_size repeated (LE 16-bit) */
+    hdr[24] = (jbig_len >> 0) & 0xFF;
+    hdr[25] = (jbig_len >> 8) & 0xFF;
+    /* SHORT[10-17] = 0 (reserved) */
+    /* resolution (LE 16-bit) */
+    hdr[42] = (resolution >> 0) & 0xFF;
+    hdr[43] = (resolution >> 8) & 0xFF;
+    /* SHORT[19] = 0x0833 (printer-specific constant, matches original driver) */
+    hdr[44] = 0x33; hdr[45] = 0x08;
+    /* SHORT[20] = 0x0b9a (printer-specific constant, LE = 2970) */
+    hdr[46] = 0x9a; hdr[47] = 0x0b;
+
+    /* XOR checksum over bytes 0-62 → byte 63 */
+    lhplh_xor_checksum(hdr, sizeof(hdr));
+
+    /* Write @sp header */
+    fwrite(hdr, 1, sizeof(hdr), fp);
+
+    /* Write JBIG parameters header (20 bytes, custom LHPLH format) */
+    /*
+     * This is NOT a standard JBIG BIE header — it's the LHPLH protocol's
+     * own page-descriptor that encodes the same parameters in a different
+     * layout (all 5 fields are big-endian DWORDs):
+     *   DWORD[0] = 0x00000100 (flags / version)
+     *   DWORD[1] = page_width  (BE)
+     *   DWORD[2] = page_height (BE)
+     *   DWORD[3] = stripe_height (BE, typically 128)
+     *   DWORD[4] = MX (BE DWORD, e.g. 0x00000040 = 64)
+     */
+    {
+        unsigned char bie[LHPLH_BIE_HDR];
+        bie[0]  = 0x00; bie[1]  = 0x00; bie[2]  = 0x01; bie[3]  = 0x00;
+        bie[4]  = (page_width >> 24) & 0xFF;
+        bie[5]  = (page_width >> 16) & 0xFF;
+        bie[6]  = (page_width >> 8) & 0xFF;
+        bie[7]  = (page_width >> 0) & 0xFF;
+        bie[8]  = (page_height >> 24) & 0xFF;
+        bie[9]  = (page_height >> 16) & 0xFF;
+        bie[10] = (page_height >> 8) & 0xFF;
+        bie[11] = (page_height >> 0) & 0xFF;
+        bie[12] = (stripe_height >> 24) & 0xFF;
+        bie[13] = (stripe_height >> 16) & 0xFF;
+        bie[14] = (stripe_height >> 8) & 0xFF;
+        bie[15] = (stripe_height >> 0) & 0xFF;
+        /* MX as big-endian DWORD (64 = 0x00000040) */
+        bie[16] = 0x00; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 64;
+        fwrite(bie, 1, sizeof(bie), fp);
     }
+
+    /* Write JBIG compressed data (without BIE header) */
+    if (jbig_len > 0)
+        fwrite(jbig_data, 1, jbig_len, fp);
+}
+
+/*
+ * Write an LHPLH @ep (End Page) command frame.
+ * Format: 64 bytes, XOR checksum at byte 63.
+ *
+ * Structure (from original driver capture):
+ *   Bytes 0-5:   1b 4c 48 40 65 70  (ESC LH @ep)
+ *   Byte  6:     0x00
+ *   Byte  7:     0x00
+ *   Byte  8:     0x06 (end-of-page marker)
+ *   Byte  9:     0x00
+ *   Byte  14:    0x00
+ *   Byte  15:    0x80 (end flag)
+ *   Bytes 16-62: padding (zeros)
+ *   Byte  63:    XOR checksum
+ */
+static void write_lhplh_ep(FILE *fp)
+{
+    unsigned char cmd[LHPLH_CMD_SIZE];
+    memset(cmd, 0, sizeof(cmd));
+
+    /* Prefix: ESC LH @ep */
+    cmd[0] = 0x1b; cmd[1] = 'L'; cmd[2] = 'H'; cmd[3] = '@';
+    cmd[4] = 'e'; cmd[5] = 'p';
+
+    /* End-of-page marker */
+    cmd[8] = 0x06;
+    cmd[15] = 0x80;
+
+    /* XOR checksum over bytes 0-62 → byte 63 */
+    lhplh_xor_checksum(cmd, sizeof(cmd));
+
+    fwrite(cmd, 1, sizeof(cmd), fp);
 }
 
 /* ── Halftone a single line ────────────────────────────────────────── */
@@ -336,45 +521,57 @@ static void halftone_line(const unsigned char *gray_in,
 /* ── Write a complete page ─────────────────────────────────────────── */
 
 static int write_page(FILE *fp, cups_raster_t *ras,
-                      cups_header_subset_t *header, int toner_save)
+                      cups_header_subset_t *header,
+                      int page_num, int copies)
 {
-    unsigned width      = header->HWResolution[0] >= 1200 ? header->cupsWidth * 2 : header->cupsWidth;
+    /*
+     * Crop to printable area width (matches original driver).
+     * Original driver uses 4768 pixels at 600 DPI, not the full page width.
+     */
+    unsigned printable_width = (header->HWResolution[0] >= 1200)
+                                ? PRINTABLE_WIDTH_1200
+                                : PRINTABLE_WIDTH_600;
+    unsigned width      = printable_width;
     unsigned height     = header->cupsHeight;
     unsigned bytes_per_line = (width + 7) / 8;
     unsigned cups_width = header->cupsWidth;
     int      duplex     = header->Duplex;
-    int      media_type = cups_mediatype_to_pjl(header->cupsMediaType);
     int      resolution = (header->HWResolution[0] >= 1200) ? 1200 : 600;
-    int      copies     = header->NumCopies > 0 ? header->NumCopies : 1;
 
-    /* ── PJL header ── */
-    pjl_printf(fp, "@PJL JOB");
-    pjl_printf(fp, "@PJL SET JOBATTR=DATE:%s", __DATE__);
+    /* ── PJL header (matches original driver format) ── */
+
+    /* UEL + JOB with NAME=PRINTER */
+    pjl_printf(fp, "\x1b%%-12345X@PJL JOB NAME=PRINTER");
+
+    /* JOBATTR: HST/USR/DOC/DATE/TIME (matches original driver) */
     {
-        time_t now = time(NULL);
-        struct tm *t = localtime(&now);
-        pjl_printf(fp, "@PJL SET JOBATTR=TIME:%02d%02d%02d",
-                   t->tm_hour, t->tm_min, t->tm_sec);
+        const char *user = (page_num > 0 && getenv("CUPS_USER")) ? getenv("CUPS_USER") : "unknown";
+        const char *host = getenv("HOSTNAME");
+        if (!host) host = "localhost";
+        pjl_printf(fp, "@PJL SET JOBATTR=HST:%s", host);
+        pjl_printf(fp, "@PJL SET JOBATTR=USR:%s", user);
+        pjl_printf(fp, "@PJL SET JOBATTR=DOC:%s",
+                   (page_num > 0) ? "document" : "unknown");
+        {
+            time_t now = time(NULL);
+            struct tm *t = localtime(&now);
+            pjl_printf(fp, "@PJL SET JOBATTR=DATE:%02d/%02d/%04d",
+                       t->tm_mon + 1, t->tm_mday, t->tm_year + 1900);
+            pjl_printf(fp, "@PJL SET JOBATTR=TIME:%02d:%02d:%02d",
+                       t->tm_hour, t->tm_min, t->tm_sec);
+        }
     }
-    pjl_printf(fp, "@PJL SET JOBATTR=USERID:");
-    pjl_printf(fp, "@PJL SET JOBATTR=PASSCODE:");
+
     pjl_printf(fp, "@PJL SET DUPLEX=%s", duplex ? "ON" : "OFF");
-    pjl_printf(fp, "@PJL SET RENDERMODE=GRAY");
     pjl_printf(fp, "@PJL SET MEDIASOURCE=%d", 0);
+    pjl_printf(fp, "@PJL SET RENDERMODE=GRAYSCALE");
     pjl_printf(fp, "@PJL SET RESOLUTION=%d", resolution);
     pjl_printf(fp, "@PJL SET BITSPERPIXEL=1");
     pjl_printf(fp, "@PJL SET COPIES=%d", copies);
-    pjl_printf(fp, "@PJL SET MEDIATYPE=%d", media_type);
-    pjl_printf(fp, "@PJL SET TONERMODE=%d", toner_save);
-    pjl_printf(fp, "@PJL COMMENT rastertolhplh v" FILTER_VERSION);
-    pjl_printf(fp, "@PJL ENTER LANGUAGE=LHPLH");
+    pjl_printf(fp, "@PJL ENTER LANGUAGE=LHPL");
 
-    /* ── 512-byte separator ── */
-    {
-        unsigned char zero[PJL_SEPARATOR];
-        memset(zero, 0, sizeof(zero));
-        fwrite(zero, 1, PJL_SEPARATOR, fp);
-    }
+    /* ── LHPLH @sj (Job Setup) ── */
+    write_lhplh_sj(fp, copies);
 
     /* ── Halftone + JBIG compress ── */
     {
@@ -392,24 +589,37 @@ static int write_page(FILE *fp, cups_raster_t *ras,
             return 1;
         }
 
+        /*
+         * JBIG T.85 encoder parameters (matching original driver):
+         *   MX = 64 (NOT 127)
+         *   options = JBG_TPBON only (NO JBG_VLENGTH!)
+         * The original driver uses MX=64 and no VLENGTH.
+         */
         jbg85_enc_init(&jbig_state, width, height, jbig_data_out, &jbig_out);
-        jbg85_enc_options(&jbig_state, JBG_TPBON | JBG_VLENGTH, 0, 127);
+        jbg85_enc_options(&jbig_state, JBG_TPBON, 0, 64);
 
         for (y = 0; y < height; y++) {
             if (!ras_read_pixels(ras, gray_line, header->cupsBytesPerLine)) {
                 fprintf(stderr, "WARNING: EOF at line %u\n", y);
                 break;
             }
+
+            /*
+             * Crop to printable area: take only the first 'width' pixels
+             * from the CUPS raster line (which may be wider).
+             * For 1200 DPI, expand 600 DPI pixels 2×.
+             */
             if (header->HWResolution[0] >= 1200 && cups_width < width) {
                 unsigned char *expanded = malloc(width + 8);
                 unsigned i;
-                for (i = 0; i < cups_width; i++) {
+                for (i = 0; i < cups_width && i * 2 < width; i++) {
                     expanded[i * 2]     = gray_line[i];
                     expanded[i * 2 + 1] = gray_line[i];
                 }
                 halftone_line(expanded, cur_line, width, y);
                 free(expanded);
             } else {
+                /* Use only the first 'width' pixels (crop to printable area) */
                 halftone_line(gray_line, cur_line, width, y);
             }
             jbg85_enc_lineout(&jbig_state, cur_line, prev_line, prev2_line);
@@ -421,18 +631,23 @@ static int write_page(FILE *fp, cups_raster_t *ras,
         jbg85_enc_newlen(&jbig_state, y);
         jbg85_enc_abort(&jbig_state);
 
-        if (jbig_out.len > 0)
-            fwrite(jbig_out.buf, 1, jbig_out.len, fp);
+        /* ── LHPLH @sp (Page Data) ── */
+        write_lhplh_sp(fp, width, y, resolution,
+                       jbig_out.buf, jbig_out.len);
 
-        fprintf(stderr, "INFO: page %ux%u @ %ddpi, JBIG %zu bytes\n",
-                width, y, resolution, jbig_out.len);
+        fprintf(stderr, "INFO: page %d %ux%u @ %ddpi, JBIG %zu bytes\n",
+                page_num, width, y, resolution, jbig_out.len);
 
         free(gray_line); free(prev_line); free(prev2_line); free(cur_line);
         free(jbig_out.buf);
     }
 
+    /* ── LHPLH @ep (End Page) ── */
+    write_lhplh_ep(fp);
+
     /* ── PJL footer ── */
     pjl_printf(fp, "@PJL EOJ");
+
     return 0;
 }
 
@@ -443,7 +658,7 @@ int main(int argc, char *argv[])
     int fd = 0;
     cups_raster_t *ras;
     cups_header_subset_t header;
-    int page = 0, toner_save = 0;
+    int page = 0, copies = 1;
 
     signal(SIGPIPE, SIG_IGN);
 
@@ -460,8 +675,10 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (argv[5] && strstr(argv[5], "TonerMode=1"))
-        toner_save = 1;
+    /* Parse copies from argv[4] */
+    if (argv[4])
+        copies = atoi(argv[4]);
+    if (copies < 1) copies = 1;
 
     ras = ras_open(fd);
     if (!ras) {
@@ -474,11 +691,13 @@ int main(int argc, char *argv[])
         if (header.cupsWidth == 0 || header.cupsHeight == 0) continue;
         if (header.cupsWidth > MAX_PAGE_WIDTH || header.cupsHeight > MAX_PAGE_HEIGHT) break;
 
+        /* Use NumCopies from CUPS header if available */
+        if (header.NumCopies > 0)
+            copies = header.NumCopies;
+
         /* Convert RGB to grayscale in the header if needed */
         if (header.cupsColorSpace == CUPS_CSPACE_RGB) {
             fprintf(stderr, "WARNING: RGB input, converting to gray (3bpp→8bpp)\n");
-            /* Each RGB pixel (3 bytes) will be converted to 1 gray byte in halftone */
-            /* We need to handle this in the read loop */
         }
 
         page++;
@@ -487,7 +706,7 @@ int main(int argc, char *argv[])
                 header.HWResolution[0], header.HWResolution[1],
                 header.cupsBitsPerPixel);
 
-        if (write_page(stdout, ras, &header, toner_save) != 0) break;
+        if (write_page(stdout, ras, &header, page, copies) != 0) break;
     }
 
     ras_close(ras);
