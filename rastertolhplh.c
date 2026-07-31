@@ -39,11 +39,12 @@
 #define LHPLH_HDR_SIZE   64    /* @sp header portion (includes XOR checksum) */
 #define LHPLH_BIE_HDR    20    /* JBIG parameters header inside @sp */
 
-/* Original driver printable area width at 600 DPI (for reference only) */
-#define PRINTABLE_WIDTH_600  4768   /* 4768 pixels = 201.8mm ≈ A4 printable width */
+/* Original driver printable area width at 600 DPI */
+#define PRINTABLE_WIDTH_600  4768   /* 4768 pixels = 201.8mm ≈ A4 printable width — matches Debian driver */
 #define PRINTABLE_WIDTH_1200 9536   /* 2× for 1200 DPI */
-/* NOTE: We now use cupsWidth from the CUPS raster header instead of
- * hardcoding these values, so the filter adapts to the PPD configuration. */
+/* NOTE: The Debian driver always uses 4768 for page_width, regardless of
+ * the CUPS raster width. We use PRINTABLE_WIDTH_600 for @sp header and
+ * JBIG encoder width, but read pixel data from the CUPS raster width. */
 
 /* CUPS raster sync words */
 #define CUPS_RASTER_SYNC    0x52615333   /* "RaS3" v2 */
@@ -412,7 +413,7 @@ static void write_lhplh_sp(FILE *fp,
     hdr[4] = 's'; hdr[5] = 'p';
 
     /* @sp header fields (mixed 16-bit + 32-bit little-endian) */
-    hdr[6] = 0x02; hdr[7] = 0x01;   /* page type/flags (SHORT, LE: 0x0102) — byte 6=0x02=JBIG compression */
+    hdr[6] = 0x00; hdr[7] = 0x01;   /* page type/flags (SHORT, LE: 0x0100) — matches Debian driver */
     /* page_width (32-bit LE) */
     hdr[8]  = (page_width >> 0) & 0xFF;
     hdr[9]  = (page_width >> 8) & 0xFF;
@@ -430,7 +431,7 @@ static void write_lhplh_sp(FILE *fp,
     hdr[19] = (uncompressed_size >> 24) & 0xFF;
     /* compressed_size (32-bit LE) — includes 20-byte BIE header size
      * even though we don't send the BIE header in the data stream.
-     * The Windows driver sets compressed_size = BIE_header(20) + compressed_data.
+     * The Debian driver sets compressed_size = BIE_header(20) + compressed_data.
      */
     unsigned compressed_size = jbig_len + 20;
     hdr[20] = (compressed_size >> 0) & 0xFF;
@@ -447,7 +448,7 @@ static void write_lhplh_sp(FILE *fp,
     hdr[42] = (resolution >> 0) & 0xFF;
     hdr[43] = (resolution >> 8) & 0xFF;
     /* printer-specific constants (16-bit LE, in 0.1mm units) */
-    hdr[44] = 0x34; hdr[45] = 0x08;   /* SHORT: 0x0834 = 2100 (210.0mm in 0.1mm units) */
+    hdr[44] = 0x33; hdr[45] = 0x08;   /* SHORT: 0x0833 = 2099 (matches Debian driver) */
     hdr[46] = 0x9a; hdr[47] = 0x0b;   /* SHORT: 0x0b9a = 2970 (297.0mm in 0.1mm units) */
 
     /* XOR checksum over bytes 0-62 → byte 63 */
@@ -465,7 +466,7 @@ static void write_lhplh_sp(FILE *fp,
      *   DWORD[1] = page_width  (BE)
      *   DWORD[2] = page_height (BE)
      *   DWORD[3] = stripe_height (BE, typically 128)
-     *   DWORD[4] = byte[16]=options(0x08=TPBON), byte[17]=MY(0), byte[18]=0, byte[19]=MX(64)
+     *   DWORD[4] = byte[16]=options(0x00=no TPBON), byte[17]=MY(0), byte[18]=0, byte[19]=MX(64)
      */
     {
         unsigned char bie[LHPLH_BIE_HDR];
@@ -482,8 +483,8 @@ static void write_lhplh_sp(FILE *fp,
         bie[13] = (stripe_height >> 16) & 0xFF;
         bie[14] = (stripe_height >> 8) & 0xFF;
         bie[15] = (stripe_height >> 0) & 0xFF;
-        /* LHPLH custom format: byte[16]=options(TPBON), byte[17]=MY(0), byte[18]=0, byte[19]=MX(64) */
-        bie[16] = 0x08; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 0x40;
+        /* LHPLH custom format: byte[16]=options(0x00=no TPBON), byte[17]=MY(0), byte[18]=0, byte[19]=MX(64) */
+        bie[16] = 0x00; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 0x40;
         fwrite(bie, 1, sizeof(bie), fp);
     }
 
@@ -516,7 +517,9 @@ static void write_lhplh_ep(FILE *fp)
     cmd[0] = 0x1b; cmd[1] = 'L'; cmd[2] = 'H'; cmd[3] = '@';
     cmd[4] = 'e'; cmd[5] = 'p';
 
-    /* End-of-page: all zeros (matches Windows driver capture) */
+    /* End-of-page markers (matches Debian driver capture) */
+    cmd[8]  = 0x06;   /* end-of-page marker */
+    cmd[15] = 0x80;   /* end flag */
 
     /* XOR checksum over bytes 0-62 → byte 63 */
     lhplh_xor_checksum(cmd, sizeof(cmd));
@@ -582,16 +585,15 @@ static int write_page(FILE *fp, cups_raster_t *ras,
      * cupsWidth=4760. Using the CUPS raster width ensures consistency between
      * the @sp header fields and the actual pixel data sent to the JBIG encoder.
      *
-     * IMPORTANT: The @sp page_width field must be 5120 (the printer's physical
-     * line width at 600 DPI), NOT the CUPS raster width. The Windows driver
-     * always sends page_width=5120 regardless of actual content width.
+     * IMPORTANT: The @sp page_width field uses the CUPS raster width,
+     * matching the Debian driver which uses the actual content width (4768).
      * The JBIG data is padded to this width by the printer.
      */
     unsigned cups_width = header->cupsWidth;
     unsigned width      = cups_width;
     unsigned height     = header->cupsHeight;
     unsigned bytes_per_line = (width + 7) / 8;
-    unsigned lhplh_page_width = 5120;  /* Fixed: printer physical width at 600 DPI */
+    unsigned lhplh_page_width = PRINTABLE_WIDTH_600;  /* 4768 — matches Debian driver */
     int      duplex     = header->Duplex;
     int      resolution = (header->HWResolution[0] >= 1200) ? 1200 : 600;
 
@@ -623,14 +625,13 @@ static int write_page(FILE *fp, cups_raster_t *ras,
             }
         }
 
-        pjl_printf(fp, "@PJL SET MEDIASOURCE=%d", 0);
+        /* PJL SET order matches Debian driver capture */
         pjl_printf(fp, "@PJL SET DUPLEX=%s", duplex ? "ON" : "OFF");
-        pjl_printf(fp, "@PJL SET MDPXS=%d", 0);   /* Media Size X (0.1mm units, 0=default) */
+        pjl_printf(fp, "@PJL SET MEDIASOURCE=%d", 0);
+        pjl_printf(fp, "@PJL SET RENDERMODE=GRAYSCALE");
+        pjl_printf(fp, "@PJL SET RESOLUTION=%d", resolution);
         pjl_printf(fp, "@PJL SET BITSPERPIXEL=1");
         pjl_printf(fp, "@PJL SET COPIES=%d", copies);
-        pjl_printf(fp, "@PJL SET RESOLUTION=%d", resolution);
-        pjl_printf(fp, "@PJL SET RENDERMODE=GRAYSCALE");
-        pjl_printf(fp, "@PJL SET PCNT=%d", 1);     /* Page Count */
         pjl_printf(fp, "@PJL ENTER LANGUAGE=LHPL");
 
         /* ── LHPLH @sj (Job Setup) ── */
@@ -639,7 +640,7 @@ static int write_page(FILE *fp, cups_raster_t *ras,
 
     /* ── Halftone + JBIG compress ── */
     {
-        unsigned lhplh_bpl = (lhplh_page_width + 7) / 8;  /* 640 bytes for 5120 pixels */
+        unsigned lhplh_bpl = (lhplh_page_width + 7) / 8;  /* bytes per line for lhplh_page_width pixels */
         unsigned char *gray_line  = malloc(header->cupsBytesPerLine > cups_width + 8
                                             ? header->cupsBytesPerLine : cups_width + 8);
         unsigned char *prev_line  = calloc(lhplh_bpl, 1);
@@ -656,16 +657,15 @@ static int write_page(FILE *fp, cups_raster_t *ras,
         }
 
         /*
-         * JBIG T.85 encoder parameters (matching original driver):
-         *   width = 5120 (printer physical line width at 600 DPI)
+         * JBIG T.85 encoder parameters (matching Debian driver):
+         *   width = cups_width (matches Debian driver which uses 4768)
          *   MX = 64 (NOT 127)
-         *   options = JBG_TPBON only (NO JBG_VLENGTH!)
-         * The Windows driver always uses width=5120 for the JBIG encoder,
-         * regardless of the actual content width. The printer expects
-         * 5120-pixel-wide lines in the JBIG data.
+         *   options = 0 (no TPBON, no VLENGTH) — matches Debian driver
+         * The Debian driver uses the actual content width (4768) for the JBIG encoder.
+         * The printer expects JBIG data width to match the @sp page_width field.
          */
         jbg85_enc_init(&jbig_state, lhplh_page_width, height, jbig_data_out, &jbig_out);
-        jbg85_enc_options(&jbig_state, JBG_TPBON, 0, 64);  /* TPBON enabled, MY=0, MX=64 — matches Windows driver */
+        jbg85_enc_options(&jbig_state, 0, 0, 64);  /* No TPBON, MY=0, MX=64 — matches Debian driver */
 
         for (y = 0; y < height; y++) {
             if (!ras_read_pixels(ras, gray_line, header->cupsBytesPerLine)) {
@@ -687,10 +687,8 @@ static int write_page(FILE *fp, cups_raster_t *ras,
 
             /*
              * Halftone the CUPS raster line to 1-bit, then pad to
-             * lhplh_page_width (5120 pixels). The Windows driver sends
-             * 5120-pixel-wide lines to the printer; the content area
-             * (4760 pixels) is left-aligned, and the remaining 360 pixels
-             * are zero-filled (white).
+             * lhplh_page_width (cups_width pixels). The Debian driver sends
+             * content-width lines (4768 pixels) to the printer.
              */
             memset(cur_line, 0, lhplh_bpl);  /* Zero-fill entire line (white) */
             halftone_line(gray_line, cur_line, width, y, header->NegativePrint);
@@ -709,7 +707,7 @@ static int write_page(FILE *fp, cups_raster_t *ras,
         }
         /*
          * The jbig85 encoder outputs SDNORM (0xFF 0x02) at the end of each
-         * stripe, but the Windows driver uses SDRST (0xFF 0x03) instead.
+         * stripe, but the Debian driver uses SDRST (0xFF 0x03) instead.
          * Replace all SDNORM markers with SDRST in the JBIG stream so the
          * printer can decode the data correctly.
          *
@@ -730,7 +728,7 @@ static int write_page(FILE *fp, cups_raster_t *ras,
          * The jbig85 encoder outputs a 20-byte BIE header at the start of
          * the stream, but the LHPLH protocol does NOT include this header —
          * the JBIG parameters are already embedded in the @sp header
-         * (bytes 64-83). The Windows driver also omits the BIE header.
+         * (bytes 64-83). The Debian driver also omits the BIE header.
          * Skip the first 20 bytes of the jbig85 output.
          */
         {
