@@ -501,10 +501,10 @@ static void write_lhplh_sp(FILE *fp,
  *   Bytes 0-5:   1b 4c 48 40 65 70  (ESC LH @ep)
  *   Byte  6:     0x00
  *   Byte  7:     0x00
- *   Byte  8:     0x06 (end-of-page marker)
+ *   Byte  8:     0x00 (matches Debian driver output)
  *   Byte  9:     0x00
  *   Byte  14:    0x00
- *   Byte  15:    0x80 (end flag)
+ *   Byte  15:    0x00 (matches Debian driver output)
  *   Bytes 16-62: padding (zeros)
  *   Byte  63:    XOR checksum
  */
@@ -517,9 +517,9 @@ static void write_lhplh_ep(FILE *fp)
     cmd[0] = 0x1b; cmd[1] = 'L'; cmd[2] = 'H'; cmd[3] = '@';
     cmd[4] = 'e'; cmd[5] = 'p';
 
-    /* End-of-page markers (matches Debian driver capture) */
-    cmd[8]  = 0x06;   /* end-of-page marker */
-    cmd[15] = 0x80;   /* end flag */
+    /* Matches Debian driver output (original lnthr8zfilter.app) */
+    cmd[8]  = 0x00;
+    cmd[15] = 0x00;
 
     /* XOR checksum over bytes 0-62 → byte 63 */
     lhplh_xor_checksum(cmd, sizeof(cmd));
@@ -692,13 +692,7 @@ static int write_page(FILE *fp, cups_raster_t *ras,
              */
             memset(cur_line, 0, lhplh_bpl);  /* Zero-fill entire line (white) */
             halftone_line(gray_line, cur_line, width, y, header->NegativePrint);
-            if (y < 3) {
-                fprintf(stderr, "DEBUG: LINE %u gray[0..9]=%d %d %d %d %d %d %d %d %d %d cur[0]=0x%02x NP=%u\n",
-                        y,
-                        gray_line[0], gray_line[1], gray_line[2], gray_line[3], gray_line[4],
-                        gray_line[5], gray_line[6], gray_line[7], gray_line[8], gray_line[9],
-                        cur_line[0], header->NegativePrint);
-            }
+
             jbg85_enc_lineout(&jbig_state, cur_line, prev_line, prev2_line);
             unsigned char *tmp = prev2_line;
             prev2_line = prev_line;
