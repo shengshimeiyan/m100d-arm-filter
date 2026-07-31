@@ -465,7 +465,7 @@ static void write_lhplh_sp(FILE *fp,
      *   DWORD[1] = page_width  (BE)
      *   DWORD[2] = page_height (BE)
      *   DWORD[3] = stripe_height (BE, typically 128)
-     *   DWORD[4] = MY:MX (BE DWORD, high WORD=MY=0x0800=2048, low WORD=MX=0x0040=64)
+     *   DWORD[4] = byte[16]=options(0x08=TPBON), byte[17]=MY(0), byte[18]=0, byte[19]=MX(64)
      */
     {
         unsigned char bie[LHPLH_BIE_HDR];
@@ -482,7 +482,7 @@ static void write_lhplh_sp(FILE *fp,
         bie[13] = (stripe_height >> 16) & 0xFF;
         bie[14] = (stripe_height >> 8) & 0xFF;
         bie[15] = (stripe_height >> 0) & 0xFF;
-        /* MY:MX as big-endian DWORD (0x08000040: MY=2048, MX=64) */
+        /* LHPLH custom format: byte[16]=options(TPBON), byte[17]=MY(0), byte[18]=0, byte[19]=MX(64) */
         bie[16] = 0x08; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 0x40;
         fwrite(bie, 1, sizeof(bie), fp);
     }
@@ -665,7 +665,7 @@ static int write_page(FILE *fp, cups_raster_t *ras,
          * 5120-pixel-wide lines in the JBIG data.
          */
         jbg85_enc_init(&jbig_state, lhplh_page_width, height, jbig_data_out, &jbig_out);
-        jbg85_enc_options(&jbig_state, 0, 0, 64);  /* TPBON disabled — test */
+        jbg85_enc_options(&jbig_state, JBG_TPBON, 0, 64);  /* TPBON enabled, MY=0, MX=64 — matches Windows driver */
 
         for (y = 0; y < height; y++) {
             if (!ras_read_pixels(ras, gray_line, header->cupsBytesPerLine)) {
