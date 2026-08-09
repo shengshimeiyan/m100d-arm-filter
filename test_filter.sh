@@ -8,8 +8,18 @@
 # The sync word is NOT part of the struct — add +4 to struct-relative offsets
 # when writing to the raw buffer.
 
-FILTER="./rastertolhplh"
-OUTPUT="./test_output.raw"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+FILTER="$SCRIPT_DIR/rastertolhplh"
+OUTPUT="$SCRIPT_DIR/test_output.raw"
+RASTER="$SCRIPT_DIR/test_raster.raw"
+DIAG="${TMPDIR:-/tmp}/m100d-filter-stderr.$$"
+cleanup() {
+    rm -f "$DIAG" "$RASTER"
+    if [ "${KEEP_OUTPUT:-0}" != 1 ]; then
+        rm -f "$OUTPUT"
+    fi
+}
+trap cleanup EXIT
 
 echo "=== Testing rastertolhplh filter ==="
 
@@ -17,9 +27,9 @@ echo "=== Testing rastertolhplh filter ==="
 python3 -c "
 import struct, sys
 
-# A4 at 600dpi: printable area 4760 x 6818 pixels
-width = 4760
-height = 100   # short page for quick test
+# A4 at 600dpi: Debian driver's printable area 4768 x 6818 pixels
+width = 4768
+height = 6818
 bpp = 8        # bits per pixel (grayscale)
 cspace = 0     # CUPS_CSPACE_W (grayscale)
 
@@ -58,41 +68,49 @@ struct.pack_into('<I', header, 400 + 4, cspace)
 # Write header
 sys.stdout.buffer.write(header)
 
-# Write pixel data: alternating black and white stripes
+# Write a deterministic full-page pattern. NegativePrint=1 means the
+# CUPS raster carries inverted gray values: 255 is intended black and
+# 0 is intended white for this filter.
 bytes_per_line = width * bpp // 8
 
 for y in range(height):
-    line = bytearray(bytes_per_line)
-    if y < height // 2:
-        # Black stripe (value 0 = black in CUPS with NegativePrint)
-        for x in range(bytes_per_line):
-            line[x] = 0
+    line = bytearray(bytes_per_line)  # intended white
+    if 100 <= y < 220 or 3000 <= y < 3120 or 6500 <= y < 6620:
+        line[:] = b'\xff' * bytes_per_line
     else:
-        # White stripe (value 255 = white in CUPS with NegativePrint)
-        for x in range(bytes_per_line):
-            line[x] = 255
+        for x in range(100, 4768, 400):
+            if x + 20 < width:
+                line[x:x + 20] = b'\xff' * 20
     sys.stdout.buffer.write(line)
 
 sys.stderr.write(f'Wrote test raster: {width}x{height}, {bpp}bpp, cspace={cspace}\n')
-" > ./test_raster.raw
+" > "$RASTER"
 
-echo "Test raster file created: $(wc -c < ./test_raster.raw) bytes"
+echo "Test raster file created: $(wc -c < "$RASTER") bytes"
 
 # Run the filter
 echo "--- Running filter ---"
-"$FILTER" 1 "test" "Test Page" 1 "" ./test_raster.raw > "$OUTPUT" 2>/tmp/filter_stderr.txt
-cat /tmp/filter_stderr.txt
+"$FILTER" 1 "test" "Test Page" 1 "" "$RASTER" > "$OUTPUT" 2>"$DIAG"
+cat "$DIAG"
 
 echo "--- Output file stats ---"
 ls -lh "$OUTPUT"
 
 # Check the PJL structure
 echo "--- PJL header check ---"
-hexdump -C "$OUTPUT" | head -20
+if command -v hexdump >/dev/null 2>&1; then
+    hexdump -C "$OUTPUT" | head -20
+else
+    od -Ax -tx1z -N320 "$OUTPUT"
+fi
 
 # Check the PJL footer
 echo "--- PJL footer check ---"
-tail -c 20 "$OUTPUT" | hexdump -C
+if command -v hexdump >/dev/null 2>&1; then
+    tail -c 20 "$OUTPUT" | hexdump -C
+else
+    tail -c 20 "$OUTPUT" | od -Ax -tx1z
+fi
 
 echo "--- Validation ---"
 python3 -c "

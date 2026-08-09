@@ -1,0 +1,8 @@
+Lenovo M100D reverse-engineering test
+
+ABCDEFGHIJKLMNOPQRSTUVWXYZ
+abcdefghijklmnopqrstuvwxyz
+0123456789 !@#$%^&*()
+
+BLACK BAR TEST: ############################################################
+END OF TEST
