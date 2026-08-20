@@ -56,6 +56,7 @@
 #define CUPS_CSPACE_W       0
 #define CUPS_CSPACE_RGB     1
 #define CUPS_CSPACE_K       3
+#define CUPS_CSPACE_GRAY   17
 #define CUPS_CSPACE_CMY     4
 #define CUPS_CSPACE_CMYK    5
 /* PWG Raster color spaces (offset by 18 from CUPS values) */
@@ -482,8 +483,15 @@ static void write_lhplh_sp(FILE *fp,
         bie[13] = (stripe_height >> 16) & 0xFF;
         bie[14] = (stripe_height >> 8) & 0xFF;
         bie[15] = (stripe_height >> 0) & 0xFF;
-        /* MY:MX as big-endian DWORD (0x08000040: MY=2048, MX=64) */
-        bie[16] = 0x00; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 0x40;
+        /*
+         * DWORD[4] = [options?][0][0][MX]
+         *   byte16 = JBIG options byte. The M100D printer firmware
+         *            (matching the known-good Windows driver) decodes with
+         *            TPBON, so set byte16 = 0x08 (JBG_TPBON).
+         *   byte19 = MX = 64 (fixed).
+         * Must stay in lock-step with the encoder's jbg85_enc_options().
+         */
+        bie[16] = 0x08; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 0x40;
         fwrite(bie, 1, sizeof(bie), fp);
     }
 
@@ -542,18 +550,12 @@ static void halftone_line(const unsigned char *gray_in,
     for (col = 0; col < width; col++) {
         unsigned char v = gray_in[col];
         /*
-         * NegativePrint (from PPD) inverts pixel values:
-         *   0 = white (originally black), 255 = black (originally white)
-         * So we use v > threshold for black pixels.
-         * With standard (non-inverted) input, use (255 - v) > threshold.
+         * NegativePrint=false (0): CUPS raster value 0=black, 255=white.
+         *   Black if: (255 - v) > threshold
+         * NegativePrint=true  (1): CUPS raster value 0=white, 255=black.
+         *   Black if: v > threshold
          */
         unsigned char threshold = bayer8x8[y % 8][col % 8];
-        /*
-         * NegativePrint (from PPD) inverts pixel values in CUPS raster:
-         *   0 = white (originally black), 255 = black (originally white)
-         * With NegativePrint:  v > threshold → black dot
-         * Without NegativePrint: (255 - v) > threshold → black dot
-         */
         int is_black = negative_print ? (v > threshold) : ((255 - v) > threshold);
         if (is_black) {
             byte_val |= (1 << bit_pos);
@@ -659,8 +661,20 @@ static int write_page(FILE *fp, cups_raster_t *ras,
          *   options = 0 (no TPBON, no VLENGTH)
          */
         jbg85_enc_init(&jbig_state, lhplh_page_width, height, jbig_data_out, &jbig_out);
-        /* Official Debian driver: no TPBON, L0=128, MX=64. */
-        jbg85_enc_options(&jbig_state, 0, 0, 64);
+        /*
+         * TPBON options for the M100D printer firmware.
+         *
+         * The WM/Windows official driver (known-good on the physical M100D)
+         * sets the @jp 5th DWORD high byte to 0x08 (= JBG_TPBON, typ-pred
+         * ON). The printer firmware therefore decodes JBIG with TPBON.
+         * The Debian capture uses byte16=0x00 (no TPBON) but is NOT
+         * validated on real hardware, so it must NOT be trusted as the
+         * decode target.
+         *
+         * To match: encoder must use TPBON AND the @sp 5th-DWORD high byte
+         * must also be 0x08 so the printer decoder enables TPBON.
+         */
+        jbg85_enc_options(&jbig_state, JBG_TPBON, 0, 64);  /* TPBON, L0=128 (default), MX=64 */
 
         for (y = 0; y < height; y++) {
             if (!ras_read_pixels(ras, gray_line, header->cupsBytesPerLine)) {
@@ -677,6 +691,31 @@ static int write_page(FILE *fp, cups_raster_t *ras,
                     unsigned char g = gray_line[i * 3 + 1];
                     unsigned char b = gray_line[i * 3 + 2];
                     gray_line[i] = (unsigned char)((r * 77 + g * 150 + b * 29) >> 8);
+                }
+            }
+
+            /*
+             * Expand 1-bit-per-pixel raster data to 8-bit grayscale.
+             * CUPS may send White (cspace=0) or Black (cspace=3) for
+             * 1bpp content, depending on the PPD configuration.
+             *
+             * White (0): 1bpp, bit-packed, 0=black, 1=white
+             * Black (3): 1bpp, bit-packed, 0=white, 1=black
+             * Gray (17): 8bpp, 1 byte/pixel, 0=black, 255=white
+             */
+            if (header->cupsColorSpace == CUPS_CSPACE_W ||
+                header->cupsColorSpace == CUPS_CSPACE_K) {
+                /* Bit-packed: cupsBytesPerLine = (width + 7) / 8 */
+                /* Expand bits to full bytes in reverse order */
+                unsigned max_bits = cups_width;
+                if (max_bits > header->cupsBytesPerLine * 8)
+                    max_bits = header->cupsBytesPerLine * 8;
+                for (unsigned i = max_bits; i > 0; i--) {
+                    unsigned byte_idx = (i - 1) >> 3;
+                    unsigned bit_idx = 7 - ((i - 1) & 7);
+                    unsigned char b = (gray_line[byte_idx] >> bit_idx) & 1;
+                    /* White cspace: 0=black, 1=white. Black cspace: inverted. */
+                    gray_line[i - 1] = (b ^ (header->cupsColorSpace == CUPS_CSPACE_K)) ? 255 : 0;
                 }
             }
 
@@ -703,10 +742,12 @@ static int write_page(FILE *fp, cups_raster_t *ras,
          * — only the SDNORM marker (0xFF 0x02) should become SDRST.
          */
         {
+            /* Only replace the LAST SDNORM with SDRST */
             size_t j;
-            for (j = 0; j + 1 < jbig_out.len; j++) {
-                if (jbig_out.buf[j] == 0xff && jbig_out.buf[j + 1] == 0x02) {
-                    jbig_out.buf[j + 1] = 0x03;  /* SDNORM → SDRST */
+            for (j = jbig_out.len; j > 0; j--) {
+                if (jbig_out.buf[j - 1] == 0xff && jbig_out.buf[j] == 0x02) {
+                    jbig_out.buf[j] = 0x03;  /* last SDNORM → SDRST */
+                    break;
                 }
             }
         }
@@ -791,13 +832,17 @@ int main(int argc, char *argv[])
             header.cupsColorSpace == CUPS_CSPACE_RGB2) {
             fprintf(stderr, "WARNING: RGB input (cspace=%d), converting to gray\n",
                     header.cupsColorSpace);
-            header.cupsColorSpace = CUPS_CSPACE_W;
-            header.cupsBitsPerPixel = 8;
-            header.cupsBytesPerLine = header.cupsWidth * 3;
+            /* Don't change cspace — the main loop handles inline conversion */
         }
-        /* Convert PWG gray to CUPS gray */
+        /* Convert PWG gray to CUPS gray (17 = GRAY, 8bpp) */
         if (header.cupsColorSpace == CUPS_CSPACE_W2) {
-            header.cupsColorSpace = CUPS_CSPACE_W;
+            header.cupsColorSpace = CUPS_CSPACE_GRAY;
+        }
+        /* Convert CUPS-CSPACE-W (0, 1bpp) to GRAY (17, 8bpp) in header */
+        if (header.cupsColorSpace == CUPS_CSPACE_W ||
+            header.cupsColorSpace == CUPS_CSPACE_K) {
+            fprintf(stderr, "INFO: 1bpp input (cspace=%d), expanding to 8bpp in filter\n",
+                    header.cupsColorSpace);
         }
 
         page++;

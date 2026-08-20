@@ -4,6 +4,13 @@
 
 # ── Local build (name without arch suffix) ──
 rastertolh
+rastertolhplh
+rastertolhplh-dbg
+rastertolhplh.arm
+
+# ── Local ARM object files (cross-compile artifacts) ──
+jbig85-*.o
+jbig_ar-*.o
 
 # ── JBIG-KIT (downloaded by install.sh) ──
 jbigkit-2.1/

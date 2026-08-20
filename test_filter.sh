@@ -11,7 +11,7 @@
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 FILTER="$SCRIPT_DIR/rastertolhplh"
 OUTPUT="$SCRIPT_DIR/test_output.raw"
-RASTER="$SCRIPT_DIR/test_raster.raw"
+RASTER="${TMPDIR:-/tmp}/m100d-filter-raster.$$"
 DIAG="${TMPDIR:-/tmp}/m100d-filter-stderr.$$"
 cleanup() {
     rm -f "$DIAG" "$RASTER"
@@ -31,7 +31,7 @@ import struct, sys
 width = 4768
 height = 6818
 bpp = 8        # bits per pixel (grayscale)
-cspace = 0     # CUPS_CSPACE_W (grayscale)
+cspace = 17    # CUPS_CSPACE_GRAY (8-bit grayscale, matches PPD)
 
 # CUPS Raster v2 on-disk format: 4-byte sync + 1792-byte header = 1796 bytes
 # (struct-relative offsets from the checkpoint, +4 for sync word)

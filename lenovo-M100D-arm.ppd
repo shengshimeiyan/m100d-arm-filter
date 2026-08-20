@@ -102,7 +102,7 @@
 *OpenUI *ColorModel/Output Color: PickOne
 *OrderDependency: 30 AnySetup *ColorModel
 *DefaultColorModel: Gray
-*ColorModel Gray/Black: "<</cupsBitsPerPixel 8/cupsBitsPerColor 8/cupsColorSpace 0/NegativePrint true>>setpagedevice"
+*ColorModel Gray/Black: "<</cupsBitsPerPixel 8/cupsBitsPerColor 8/cupsColorSpace 17/NegativePrint true>>setpagedevice"
 *CloseUI: *ColorModel
 
 *% == Duplex ==
