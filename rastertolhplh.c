@@ -484,14 +484,14 @@ static void write_lhplh_sp(FILE *fp,
         bie[14] = (stripe_height >> 8) & 0xFF;
         bie[15] = (stripe_height >> 0) & 0xFF;
         /*
-         * DWORD[4] = [options?][0][0][MX]
+         * DWORD[4] = [options][0][0][MX]
          *   byte16 = JBIG options byte. The M100D printer firmware
-         *            (matching the known-good Windows driver) decodes with
-         *            TPBON, so set byte16 = 0x08 (JBG_TPBON).
-         *   byte19 = MX = 64 (fixed).
-         * Must stay in lock-step with the encoder's jbg85_enc_options().
+         *            decodes with the options set by the @sp BIE, so the
+         *            encoder's jbg85_enc_options() and this byte must
+         *            agree. We use JBG_LRLTWO (0x40) + Windows MX=8, so
+         *            byte16 = 0x40 (LRLTWO), byte19 = 0x08 (MX=8).
          */
-        bie[16] = 0x08; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 0x40;
+        bie[16] = 0x40; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 0x08;
         fwrite(bie, 1, sizeof(bie), fp);
     }
 
@@ -540,12 +540,13 @@ static void halftone_line(const unsigned char *gray_in,
                           unsigned char       *bit_out,
                           unsigned             width,
                           unsigned             y,
-                          int                  negative_print)
+                          int                  negative_print,
+                          unsigned             left_pad_bits)
 {
     unsigned col;
-    unsigned byte_idx = 0;
-    unsigned char byte_val = 0;
-    unsigned bit_pos  = 7;
+    unsigned byte_idx = left_pad_bits / 8;
+    unsigned char byte_val = (left_pad_bits % 8) ? (0xFF << (8 - (left_pad_bits % 8))) : 0;
+    unsigned bit_pos  = (left_pad_bits % 8) ? (7 - (left_pad_bits % 8)) : 7;
 
     for (col = 0; col < width; col++) {
         unsigned char v = gray_in[col];
@@ -592,7 +593,10 @@ static int write_page(FILE *fp, cups_raster_t *ras,
     unsigned cups_width = header->cupsWidth;
     unsigned width      = cups_width;
     unsigned height     = header->cupsHeight;
-    unsigned lhplh_page_width = PRINTABLE_WIDTH_600;  /* 4768, Debian driver */
+    unsigned lhplh_page_width = 5120;  /* match Windows prn BIE width */
+    unsigned left_pad = (lhplh_page_width > width) ?
+                        (lhplh_page_width - width) / 2 : 0;
+    unsigned g_stripe_height = 128;  /* L0 */
     int      duplex     = header->Duplex;
     int      resolution = (header->HWResolution[0] >= 1200) ? 1200 : 600;
 
@@ -674,8 +678,99 @@ static int write_page(FILE *fp, cups_raster_t *ras,
          * To match: encoder must use TPBON AND the @sp 5th-DWORD high byte
          * must also be 0x08 so the printer decoder enables TPBON.
          */
-        jbg85_enc_options(&jbig_state, JBG_TPBON, 0, 64);  /* TPBON, L0=128 (default), MX=64 */
+        jbg85_enc_options(&jbig_state, JBG_LRLTWO, g_stripe_height, 8);  /* LRLTWO MX=8 (Windows match) */
 
+        /* M100D firmware workaround: the printer's JBIG decoder desyncs
+         * (everything below prints blank) when a stripe starts with an
+         * all-white first line that is followed by non-white content.
+         *
+         * Solution: pre-halftone the entire page into a buffer, then for
+         * every stripe whose first row is all-white AND the stripe has
+         * some non-white content later, copy the stripe's first non-white
+         * row onto the first row. Empty stripes (all rows white) and
+         * stripes that already start with a non-white row are untouched.
+         */
+        {
+            unsigned long buf_bytes = (unsigned long)height * lhplh_bpl;
+            unsigned char *halftone_buf = (unsigned char *)malloc(buf_bytes);
+            if (!halftone_buf) {
+                fprintf(stderr, "ERROR: cannot allocate %lu bytes\n", buf_bytes);
+                return 1;
+            }
+            memset(halftone_buf, 0, buf_bytes);
+            /* Pass 1: halftone every row into buffer */
+            for (y = 0; y < height; y++) {
+                if (!ras_read_pixels(ras, gray_line, header->cupsBytesPerLine)) {
+                    fprintf(stderr, "WARNING: EOF at line %u\n", y);
+                    break;
+                }
+                /* Convert RGB -> gray */
+                if (header->cupsColorSpace == CUPS_CSPACE_RGB ||
+                    header->cupsColorSpace == CUPS_CSPACE_RGB2) {
+                    unsigned i;
+                    for (i = 0; i < cups_width; i++) {
+                        unsigned char r = gray_line[i * 3];
+                        unsigned char g = gray_line[i * 3 + 1];
+                        unsigned char b = gray_line[i * 3 + 2];
+                        gray_line[i] = (unsigned char)((r * 77 + g * 150 + b * 29) >> 8);
+                    }
+                } else if (header->cupsColorSpace == CUPS_CSPACE_W ||
+                           header->cupsColorSpace == CUPS_CSPACE_K) {
+                    unsigned max_bits = cups_width;
+                    if (max_bits > header->cupsBytesPerLine * 8)
+                        max_bits = header->cupsBytesPerLine * 8;
+                    for (unsigned i = max_bits; i > 0; i--) {
+                        unsigned byte_idx = (i - 1) >> 3;
+                        unsigned bit_idx = 7 - ((i - 1) & 7);
+                        unsigned char b = (gray_line[byte_idx] >> bit_idx) & 1;
+                        gray_line[i - 1] = (b ^ (header->cupsColorSpace == CUPS_CSPACE_K)) ? 255 : 0;
+                    }
+                }
+                memset(cur_line, 0, lhplh_bpl);
+                halftone_line(gray_line, cur_line, width, y, header->NegativePrint, left_pad);
+                memcpy(halftone_buf + (unsigned long)y * lhplh_bpl,
+                       cur_line, lhplh_bpl);
+            }
+            /* Pass 1.5: workaround - fix white-first non-empty stripes */
+            {
+                unsigned stripe_h = g_stripe_height;
+                unsigned sy;
+                for (sy = 0; sy < height; sy += stripe_h) {
+                    unsigned long stripe_start = (unsigned long)sy * lhplh_bpl;
+                    unsigned off, all_white = 1;
+                    for (off = left_pad/8; off < (left_pad+width+7)/8; off++)
+                        if (halftone_buf[stripe_start + off]) {
+                            all_white = 0; break;
+                        }
+                    if (!all_white) continue;
+                    unsigned dy; int found = 0; unsigned long first_nw = 0;
+                    for (dy = 1; dy < stripe_h && sy + dy < height; dy++) {
+                        unsigned long row = stripe_start + (unsigned long)dy * lhplh_bpl;
+                        for (off = left_pad/8; off < (left_pad+width+7)/8; off++)
+                            if (halftone_buf[row + off]) {
+                                first_nw = row; found = 1; break;
+                            }
+                        if (found) break;
+                    }
+                    if (!found) continue;
+                    memcpy(halftone_buf + stripe_start,
+                           halftone_buf + first_nw, lhplh_bpl);
+                }
+            }
+            /* Pass 2: encode from buffer */
+            for (y = 0; y < height; y++) {
+                memcpy(cur_line, halftone_buf + (unsigned long)y * lhplh_bpl,
+                       lhplh_bpl);
+                jbg85_enc_lineout(&jbig_state, cur_line, prev_line, prev2_line);
+                unsigned char *tmp = prev2_line;
+                prev2_line = prev_line;
+                prev_line  = cur_line;
+                cur_line   = tmp;
+            }
+            free(halftone_buf);
+        }
+        /* original loop body below was kept for reference but is dead code */
+        #if 0
         for (y = 0; y < height; y++) {
             if (!ras_read_pixels(ras, gray_line, header->cupsBytesPerLine)) {
                 fprintf(stderr, "WARNING: EOF at line %u\n", y);
@@ -725,13 +820,14 @@ static int write_page(FILE *fp, cups_raster_t *ras,
              * left-aligned and the remaining pixels are white.
              */
             memset(cur_line, 0, lhplh_bpl);  /* Zero-fill entire line (white) */
-            halftone_line(gray_line, cur_line, width, y, header->NegativePrint);
+            halftone_line(gray_line, cur_line, width, y, header->NegativePrint, left_pad);
             jbg85_enc_lineout(&jbig_state, cur_line, prev_line, prev2_line);
             unsigned char *tmp = prev2_line;
             prev2_line = prev_line;
             prev_line  = cur_line;
             cur_line   = tmp;
         }
+        #endif
         /*
          * The jbig85 encoder outputs SDNORM (0xFF 0x02) at the end of each
          * stripe, but the Windows driver uses SDRST (0xFF 0x03) instead.

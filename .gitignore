@@ -37,3 +37,15 @@ Thumbs.db
 *.7z
 *.tar.gz
 *.zip
+
+# Windows 官方驱动二进制（闭源，GPLv2-only 用于互操作性研究）
+analysis/windows-driver/*.dll
+analysis/windows-driver/*.exe
+analysis/windows-driver/*.SYS
+analysis/windows-driver/*.INF
+
+# 临时构建产物 / 调试文件
+*.bak
+*.bak*
+rastertolhplh_dbg
+rastertolhplh-*-dbg
