@@ -404,7 +404,6 @@ static void write_lhplh_sp(FILE *fp,
 {
     unsigned char hdr[LHPLH_HDR_SIZE];
     unsigned uncompressed_size = ((page_width + 7) / 8) * page_height;
-    unsigned stripe_height = 128;  /* L0 = 128, matches original driver (fixed) */
 
     memset(hdr, 0, sizeof(hdr));
 
@@ -413,7 +412,7 @@ static void write_lhplh_sp(FILE *fp,
     hdr[4] = 's'; hdr[5] = 'p';
 
     /* @sp header fields (mixed 16-bit + 32-bit little-endian) */
-    hdr[6] = 0x00; hdr[7] = 0x01;   /* page type/flags (SHORT, LE: 0x0100) — Debian driver */
+    hdr[6] = 0x02; hdr[7] = 0x01;   /* page type/flags (SHORT, LE: 0x0102) — Windows driver */
     /* page_width (32-bit LE) */
     hdr[8]  = (page_width >> 0) & 0xFF;
     hdr[9]  = (page_width >> 8) & 0xFF;
@@ -429,11 +428,9 @@ static void write_lhplh_sp(FILE *fp,
     hdr[17] = (uncompressed_size >> 8) & 0xFF;
     hdr[18] = (uncompressed_size >> 16) & 0xFF;
     hdr[19] = (uncompressed_size >> 24) & 0xFF;
-    /* compressed_size (32-bit LE) — includes 20-byte BIE header size
-     * even though we don't send the BIE header in the data stream.
-     * The Windows driver sets compressed_size = BIE_header(20) + compressed_data.
-     */
-    unsigned compressed_size = jbig_len + 20;
+    /* compressed_size (32-bit LE) — equals the JBIG stream length
+     * INCLUDING the 20-byte BIH header (matches Windows driver). */
+    unsigned compressed_size = jbig_len;
     hdr[20] = (compressed_size >> 0) & 0xFF;
     hdr[21] = (compressed_size >> 8) & 0xFF;
     hdr[22] = (compressed_size >> 16) & 0xFF;
@@ -448,7 +445,7 @@ static void write_lhplh_sp(FILE *fp,
     hdr[42] = (resolution >> 0) & 0xFF;
     hdr[43] = (resolution >> 8) & 0xFF;
     /* printer-specific constants (16-bit LE, in 0.1mm units) */
-    hdr[44] = 0x33; hdr[45] = 0x08;   /* SHORT: 0x0833 = 2099 (Debian driver) */
+    hdr[44] = 0x34; hdr[45] = 0x08;   /* SHORT: 0x0834 = 2100 (Windows driver) */
     hdr[46] = 0x9a; hdr[47] = 0x0b;   /* SHORT: 0x0b9a = 2970 (297.0mm in 0.1mm units) */
 
     /* XOR checksum over bytes 0-62 → byte 63 */
@@ -457,45 +454,11 @@ static void write_lhplh_sp(FILE *fp,
     /* Write @sp header */
     fwrite(hdr, 1, sizeof(hdr), fp);
 
-    /* Write JBIG parameters header (20 bytes, custom LHPLH format) */
-    /*
-     * This is NOT a standard JBIG BIE header — it's the LHPLH protocol's
-     * own page-descriptor that encodes the same parameters in a different
-     * layout (all 5 fields are big-endian DWORDs):
-     *   DWORD[0] = 0x00000100 (flags / version)
-     *   DWORD[1] = page_width  (BE)
-     *   DWORD[2] = page_height (BE)
-     *   DWORD[3] = stripe_height (BE, typically 128)
-     *   DWORD[4] = MY:MX (BE DWORD, high WORD=MY=0x0800=2048, low WORD=MX=0x0040=64)
-     */
-    {
-        unsigned char bie[LHPLH_BIE_HDR];
-        bie[0]  = 0x00; bie[1]  = 0x00; bie[2]  = 0x01; bie[3]  = 0x00;
-        bie[4]  = (page_width >> 24) & 0xFF;
-        bie[5]  = (page_width >> 16) & 0xFF;
-        bie[6]  = (page_width >> 8) & 0xFF;
-        bie[7]  = (page_width >> 0) & 0xFF;
-        bie[8]  = (page_height >> 24) & 0xFF;
-        bie[9]  = (page_height >> 16) & 0xFF;
-        bie[10] = (page_height >> 8) & 0xFF;
-        bie[11] = (page_height >> 0) & 0xFF;
-        bie[12] = (stripe_height >> 24) & 0xFF;
-        bie[13] = (stripe_height >> 16) & 0xFF;
-        bie[14] = (stripe_height >> 8) & 0xFF;
-        bie[15] = (stripe_height >> 0) & 0xFF;
-        /*
-         * DWORD[4] = [options][0][0][MX]
-         *   byte16 = JBIG options byte. The M100D printer firmware
-         *            decodes with the options set by the @sp BIE, so the
-         *            encoder's jbg85_enc_options() and this byte must
-         *            agree. We use JBG_LRLTWO (0x40) + Windows MX=8, so
-         *            byte16 = 0x40 (LRLTWO), byte19 = 0x08 (MX=8).
-         */
-        bie[16] = 0x40; bie[17] = 0x00; bie[18] = 0x00; bie[19] = 0x08;
-        fwrite(bie, 1, sizeof(bie), fp);
-    }
-
-    /* Write JBIG compressed data (without BIE header) */
+    /* Write JBIG compressed data (with BIH header, matching Windows driver).
+     * The Windows driver emits the standard 20-byte JBIG BIH immediately
+     * after the @sp frame, then the arithmetic-coded data. The BIH layout is
+     * the standard one: byte16=MX, byte19=options (LRLTWO). jbig85 outputs
+     * this header at the start of its stream, so we must NOT strip it. */
     if (jbig_len > 0)
         fwrite(jbig_data, 1, jbig_len, fp);
 }
@@ -524,9 +487,7 @@ static void write_lhplh_ep(FILE *fp)
     cmd[0] = 0x1b; cmd[1] = 'L'; cmd[2] = 'H'; cmd[3] = '@';
     cmd[4] = 'e'; cmd[5] = 'p';
 
-    /* Debian driver end-of-page fields. */
-    cmd[8]  = 0x06;
-    cmd[15] = 0x80;
+    /* All other fields zeroed (matches Windows driver: full-zero @ep) */
 
     /* XOR checksum over bytes 0-62 → byte 63 */
     lhplh_xor_checksum(cmd, sizeof(cmd));
@@ -593,9 +554,35 @@ static int write_page(FILE *fp, cups_raster_t *ras,
     unsigned cups_width = header->cupsWidth;
     unsigned width      = cups_width;
     unsigned height     = header->cupsHeight;
+    /* M100D firmware workaround: the printer requires blank stripe(s) at the
+     * top of the page (its JBIG decoder desyncs / refuses to print when the
+     * first stripe contains data). The Windows driver pads 4 stripes (512
+     * rows); tests show 1 blank stripe (128 rows) is sufficient. */
+    unsigned top_pad     = 128;
+    const char *pad_env  = getenv("TOP_PAD");
+    if (pad_env) {
+        unsigned v = (unsigned)atoi(pad_env);
+        if (v > 0 && v <= 1024) top_pad = v;
+    }
+    unsigned total_height = height + top_pad;
+    /* M100D 打印机可打印高度 6755px (纸张 297mm - 顶边距 11.08mm)。
+     * 若内容+padding 超出，警告（内容底部将被裁）。 */
+    if (total_height > 6755) {
+        fprintf(stderr, "WARNING: page height %u exceeds printable 6755px\n",
+                total_height);
+    }
     unsigned lhplh_page_width = 5120;  /* match Windows prn BIE width */
-    unsigned left_pad = (lhplh_page_width > width) ?
-                        (lhplh_page_width - width) / 2 : 0;
+    /* M100D 打印机实测物理边距: 画布原点在纸张 (6.55mm, 11.08mm),
+     * 左右边距各 ~6.55mm (155px), 可打印宽度 4651px @600dpi。
+     * 内容在可打印区内居中，避免右侧超出纸张被裁。 */
+    unsigned printable_width = 4651;
+    const char *pw_env = getenv("PRINTABLE_WIDTH");
+    if (pw_env) {
+        unsigned v = (unsigned)atoi(pw_env);
+        if (v >= 500 && v <= 5120) printable_width = v;
+    }
+    unsigned left_pad = (printable_width > width) ?
+                        (printable_width - width) / 2 : 0;
     unsigned g_stripe_height = 128;  /* L0 */
     int      duplex     = header->Duplex;
     int      resolution = (header->HWResolution[0] >= 1200) ? 1200 : 600;
@@ -630,10 +617,11 @@ static int write_page(FILE *fp, cups_raster_t *ras,
 
         pjl_printf(fp, "@PJL SET DUPLEX=%s", duplex ? "ON" : "OFF");
         pjl_printf(fp, "@PJL SET MEDIASOURCE=%d", 0);
-        pjl_printf(fp, "@PJL SET RENDERMODE=GRAYSCALE");
-        pjl_printf(fp, "@PJL SET RESOLUTION=%d", resolution);
+        pjl_printf(fp, "@PJL SET MDPXS=0");
         pjl_printf(fp, "@PJL SET BITSPERPIXEL=1");
         pjl_printf(fp, "@PJL SET COPIES=%d", copies);
+        pjl_printf(fp, "@PJL SET RESOLUTION=%d", resolution);
+        pjl_printf(fp, "@PJL SET RENDERMODE=GRAYSCALE");
         pjl_printf(fp, "@PJL ENTER LANGUAGE=LHPL");
 
         /* ── LHPLH @sj (Job Setup) ── */
@@ -664,7 +652,7 @@ static int write_page(FILE *fp, cups_raster_t *ras,
          *   MX = 64 (NOT 127)
          *   options = 0 (no TPBON, no VLENGTH)
          */
-        jbg85_enc_init(&jbig_state, lhplh_page_width, height, jbig_data_out, &jbig_out);
+        jbg85_enc_init(&jbig_state, lhplh_page_width, total_height, jbig_data_out, &jbig_out);
         /*
          * TPBON options for the M100D printer firmware.
          *
@@ -691,14 +679,14 @@ static int write_page(FILE *fp, cups_raster_t *ras,
          * stripes that already start with a non-white row are untouched.
          */
         {
-            unsigned long buf_bytes = (unsigned long)height * lhplh_bpl;
+            unsigned long buf_bytes = (unsigned long)total_height * lhplh_bpl;
             unsigned char *halftone_buf = (unsigned char *)malloc(buf_bytes);
             if (!halftone_buf) {
                 fprintf(stderr, "ERROR: cannot allocate %lu bytes\n", buf_bytes);
                 return 1;
             }
             memset(halftone_buf, 0, buf_bytes);
-            /* Pass 1: halftone every row into buffer */
+            /* Pass 1: halftone every row into buffer (after top padding) */
             for (y = 0; y < height; y++) {
                 if (!ras_read_pixels(ras, gray_line, header->cupsBytesPerLine)) {
                     fprintf(stderr, "WARNING: EOF at line %u\n", y);
@@ -725,26 +713,47 @@ static int write_page(FILE *fp, cups_raster_t *ras,
                         unsigned char b = (gray_line[byte_idx] >> bit_idx) & 1;
                         gray_line[i - 1] = (b ^ (header->cupsColorSpace == CUPS_CSPACE_K)) ? 255 : 0;
                     }
+                } else if (header->cupsBytesPerLine >= cups_width * 2) {
+                    /* GRAY may be delivered as 32bpp (4 bytes/pixel) by
+                     * some CUPS versions (cupsfilter/texttops): extract the
+                     * first byte of each pixel group. */
+                    unsigned bytes_pp = header->cupsBytesPerLine / cups_width;
+                    if (bytes_pp > 1) {
+                        unsigned char *tmp = (unsigned char *)malloc(header->cupsBytesPerLine);
+                        if (tmp) {
+                            memcpy(tmp, gray_line, header->cupsBytesPerLine);
+                            for (unsigned i = 0; i < cups_width; i++)
+                                gray_line[i] = tmp[i * bytes_pp];
+                            free(tmp);
+                        }
+                    }
                 }
                 memset(cur_line, 0, lhplh_bpl);
-                halftone_line(gray_line, cur_line, width, y, header->NegativePrint, left_pad);
-                memcpy(halftone_buf + (unsigned long)y * lhplh_bpl,
+                /* CUPS delivers standard grayscale (0=black, 255=white)
+                 * regardless of the PPD NegativePrint flag (verified on the
+                 * M100D via cupsfilter/texttops). Force standard polarity. */
+                halftone_line(gray_line, cur_line, width, y, 0, left_pad);
+                memcpy(halftone_buf + ((unsigned long)top_pad + y) * lhplh_bpl,
                        cur_line, lhplh_bpl);
             }
-            /* Pass 1.5: workaround - fix white-first non-empty stripes */
+            /* Pass 1.5: workaround - fix white-first non-empty stripes.
+             * The printer firmware desyncs (content below goes blank) when a
+             * stripe's FIRST row is all white but the stripe contains content
+             * later. Copy the stripe's first non-white row onto the first
+             * row. Fully empty stripes are left untouched. */
             {
                 unsigned stripe_h = g_stripe_height;
                 unsigned sy;
-                for (sy = 0; sy < height; sy += stripe_h) {
+                for (sy = 0; sy < total_height; sy += stripe_h) {
                     unsigned long stripe_start = (unsigned long)sy * lhplh_bpl;
-                    unsigned off, all_white = 1;
+                    unsigned off, first_row_white = 1;
                     for (off = left_pad/8; off < (left_pad+width+7)/8; off++)
                         if (halftone_buf[stripe_start + off]) {
-                            all_white = 0; break;
+                            first_row_white = 0; break;
                         }
-                    if (!all_white) continue;
+                    if (!first_row_white) continue;
                     unsigned dy; int found = 0; unsigned long first_nw = 0;
-                    for (dy = 1; dy < stripe_h && sy + dy < height; dy++) {
+                    for (dy = 1; dy < stripe_h && sy + dy < total_height; dy++) {
                         unsigned long row = stripe_start + (unsigned long)dy * lhplh_bpl;
                         for (off = left_pad/8; off < (left_pad+width+7)/8; off++)
                             if (halftone_buf[row + off]) {
@@ -752,13 +761,13 @@ static int write_page(FILE *fp, cups_raster_t *ras,
                             }
                         if (found) break;
                     }
-                    if (!found) continue;
+                    if (!found) continue;   /* fully empty stripe */
                     memcpy(halftone_buf + stripe_start,
                            halftone_buf + first_nw, lhplh_bpl);
                 }
             }
             /* Pass 2: encode from buffer */
-            for (y = 0; y < height; y++) {
+            for (y = 0; y < total_height; y++) {
                 memcpy(cur_line, halftone_buf + (unsigned long)y * lhplh_bpl,
                        lhplh_bpl);
                 jbg85_enc_lineout(&jbig_state, cur_line, prev_line, prev2_line);
@@ -850,21 +859,20 @@ static int write_page(FILE *fp, cups_raster_t *ras,
 
         /* ── LHPLH @sp (Page Data) ── */
         /*
-         * The jbig85 encoder outputs a 20-byte BIE header at the start of
-         * the stream, but the LHPLH protocol does NOT include this header —
-         * the JBIG parameters are already embedded in the @sp header
-         * (bytes 64-83). The Windows driver also omits the BIE header.
-         * Skip the first 20 bytes of the jbig85 output.
+         * The jbig85 encoder outputs a 20-byte BIH header at the start of
+         * the stream. The Windows driver KEEPS this header (standard JBIG
+         * BIH, byte16=MX, byte19=options) right after the @sp frame, so we
+         * pass the complete stream including the BIH.
          */
         {
-            size_t jbig_start = 20;  /* skip BIE header */
-            size_t jbig_len   = jbig_out.len > 20 ? jbig_out.len - 20 : 0;
-            write_lhplh_sp(fp, lhplh_page_width, y, resolution,
+            size_t jbig_start = 0;  /* keep BIH header (Windows driver match) */
+            size_t jbig_len   = jbig_out.len > jbig_start ? jbig_out.len - jbig_start : 0;
+            write_lhplh_sp(fp, lhplh_page_width, total_height, resolution,
                            jbig_out.buf + jbig_start, jbig_len);
         }
 
         fprintf(stderr, "INFO: page %d %ux%u @ %ddpi, JBIG %zu bytes\n",
-                page_num, width, y, resolution, jbig_out.len);
+                page_num, width, total_height, resolution, jbig_out.len);
 
         free(gray_line); free(prev_line); free(prev2_line); free(cur_line);
         free(jbig_out.buf);

@@ -58,7 +58,7 @@
 
 *DefaultImageableArea: A4
 *ImageableArea Letter/US Letter: "11.905511856079 11.905511856079 600.094482421875 780.094482421875"
-*ImageableArea A4/A4: "11.905511856079 11.905511856079 583.094482421875 830.094482421875"
+*ImageableArea A4/A4: "18.6 1.0 576.9 796.2"
 *ImageableArea A5/A5: "11.905511856079 11.905511856079 408.094482421875 583.094482421875"
 *ImageableArea A6/A6: "11.905511856079 11.905511856079 285.094482421875 408.094482421875"
 *ImageableArea B5/JIS B5: "11.905511856079 11.905511856079 504.094482421875 717.094482421875"
@@ -102,7 +102,7 @@
 *OpenUI *ColorModel/Output Color: PickOne
 *OrderDependency: 30 AnySetup *ColorModel
 *DefaultColorModel: Gray
-*ColorModel Gray/Black: "<</cupsBitsPerPixel 8/cupsBitsPerColor 8/cupsColorSpace 17/NegativePrint true>>setpagedevice"
+*ColorModel Gray/Black: "<</cupsBitsPerPixel 8/cupsBitsPerColor 8/cupsColorSpace 17/NegativePrint false>>setpagedevice"
 *CloseUI: *ColorModel
 
 *% == Duplex ==

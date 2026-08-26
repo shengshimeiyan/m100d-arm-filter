@@ -253,3 +253,30 @@ plane_buffer[] = [3, 0, 0, 0] 表示 K-plane active，其他 CMY 被跳过。
 **之前混淆**：BIH byte 4-7 (L0) 实际对应 Windows state 的 y0 (duplicate)；BIH byte 12-15 (AT length) 用 state 的 [s+0x1c]。
 
 完整分析见 [`analysis/windows-driver/README.md`](analysis/windows-driver/README.md)。
+
+## 2026-08 最终成果：CUPS 完整打印路径打通 ✅
+
+### 实测打印机物理特性（定位页测量）
+- **画布原点**：纸张 (6.55mm, 11.08mm)，600dpi 精确映射
+- **可打印区**：4651×6755px（左右边距 6.55mm，顶部 11.08mm）
+- **画布 BIH 5120×6946 超出纸张**（右侧 13mm、底部 8mm 被裁）→ 必须缩放到可打印区
+
+### 最终修复清单
+1. **可打印区适配**：`left_pad` 基于可打印宽 4651（`PRINTABLE_WIDTH` env 可调）
+2. **顶部 padding**：128 行空白（`TOP_PAD` env 可调），固件要求开头 ≥1 空白 stripe
+3. **白首行 workaround 修复**：原来检查"整 stripe 全白"（无效），改为检查"stripe 首行"——首行白+非空时复制第一非白行到首行
+4. **32bpp 灰度提取**：CUPS cupsfilter/texttops 输出 32bpp RGBA（4B/px），filter 原来按 1B/px 处理导致内容压缩/丢失；用临时缓冲正确提取
+5. **极性**：CUPS 实际输出标准灰度（0=黑 255=白），与 PPD NegativePrint 标志无关 → 强制标准极性
+6. **@ep 帧**：移除 Debian 驱动遗留字段（cmd[8]=0x06, cmd[15]=0x80），对齐 Windows 全 0
+7. **BIH/compressed_size**：保留标准 BIH（byte16=MX=8, byte19=LRLTWO=0x40），compressed_size = JBIG 总长（含 BIH）
+8. **PPD**：A4 ImageableArea 更新为实测可打印区，NegativePrint=false
+
+### 验证结果
+- ✅ 网格页：外框完整、中心居中、无截断
+- ✅ 文字页（手动路径）：中文+英文正常、居中、无被裁
+- ✅ CUPS 完整路径（`lp` 打印）：texttops → raster → filter → 打印机，文字正常
+- ✅ 解码验证：5120×6755，内容完整（标题不丢失）
+
+### 最终二进制
+- aarch64：`rastertolhplh-aarch64`（静态链接，零 libcups 依赖）
+- 已部署：`root@100.94.110.126:/usr/lib/cups/filter/rastertolhplh`
