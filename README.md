@@ -20,22 +20,32 @@
 
 联想 M100D / L100D 等系列打印机使用 **GDI 协议**（主机端渲染），官方仅提供 x86-64 的闭源 CUPS 过滤器 `lnthr8zfilter.app`，在 ARM 设备（如骁龙 410 随身 WiFi、树莓派等）上完全无法使用。
 
-本项目通过**逆向工程**分析官方 Debian 驱动的 PJL/LHPLH 协议，编写了完全独立的 ARM 原生 CUPS 过滤器，**静态链接、零运行时依赖**，在 512MB 内存 + 4GB 存储的设备上也能流畅运行。
+本项目通过**逆向工程**分析官方 Windows 驱动（`LNTHR9Zfm.dll`）与 Debian 驱动抓包，编写了完全独立的 ARM 原生 CUPS 过滤器，**静态链接、零运行时依赖**。
+
+**2026-08 已完整打通 CUPS 打印路径**：`lp` 命令直接打印文本/PDF 正确出纸，中文/英文渲染正常，居中无裁剪。
 
 ## 工作原理
 
 ```
   CUPS Raster          8×8 Bayer         JBIG T.85          PJL/LHPLH
-  (灰度光栅)    ──→   有序抖动半色调  ──→   压缩编码    ──→   打印机数据
-  8-bit/pixel         1-bit/pixel        T.85 标准压缩      GDI 协议输出
+  (灰度/1bpp/32bpp) ──→ 有序抖动半色调 ──→ 压缩编码 ──→   打印机数据
 ```
 
 | 步骤 | 说明 |
 |------|------|
-| **输入** | CUPS Raster v2（灰度，8-bit） |
-| **半色调** | 8×8 Bayer 有序抖动（内存高效，文本效果好） |
-| **压缩** | JBIG T.85（ITU-T T.85，MX=64，标准 jbigkit-2.1） |
+| **输入** | CUPS Raster v2（支持 8bpp 灰度 / 1bpp W/K / 32bpp RGBA 灰度） |
+| **半色调** | 8×8 Bayer 有序抖动 |
+| **固件 workaround** | 顶部 128 行空白 padding + 白首行 stripe 修复（见下） |
+| **压缩** | JBIG T.85（jbigkit-2.1 修改版），**LRLTWO + MX=8 + SDRST** |
 | **输出** | PJL 作业控制 + LHPLH 命令帧（@sj/@sp/@ep） |
+
+## ⚠️ 固件 workaround（关键）
+
+物理打印机实测发现的 M100D 固件特性：
+
+1. **页面顶部必须 ≥1 个空白 stripe**（128 行 @600dpi）：否则打印机"轰鸣不出纸"。Windows 官方驱动使用 4 个空白 stripe（512 行）。过滤器自动在顶部添加 128 行空白（`TOP_PAD` 环境变量可调）。
+2. **stripe 首行为白但内含内容时，固件解码失步**（该 stripe 及以下内容变空白）：过滤器复制该 stripe 第一非白行到首行。
+3. **可打印区**：实测打印机画布原点在纸张 (6.55mm, 11.08mm) 处，600dpi 精确映射，可打印区 **4651×6755px**。内容居中于可打印区（`PRINTABLE_WIDTH` 环境变量可调）。
 
 ## 快速开始
 
@@ -47,38 +57,11 @@ cd m100d-arm-filter
 sudo bash install.sh
 ```
 
-`install.sh` 自动完成：
-1. ✅ 检查/安装 `gcc` + `make`
-2. ✅ 下载 JBIG-KIT 2.1 源码
-3. ✅ 编译静态二进制（~660KB）
-4. ✅ 安装过滤器 + PPD + USB 规则
-5. ✅ 重启 CUPS
-
 ### 配置为打印服务器（AirPrint）
 
 ```bash
 sudo bash setup-print-server.sh
 ```
-
-一键配置 CUPS 网络共享 + AirPrint，局域网内所有设备可直接打印：
-
-```
-                    ┌──────────────────────┐
-  📱 iPhone ──────→│                      │
-  (AirPrint)       │   骁龙410 / 树莓派   │    USB     ┌─────────┐
-                   │   CUPS 打印服务器     │─────────→│  M100D  │
-  💻 Windows ─────→│   (rastertolhplh)    │           │  打印机  │
-  (IPP)            │                      │           └─────────┘
-                   └──────────────────────┘
-```
-
-| 客户端 | 连接方式 |
-|--------|---------|
-| iPhone / iPad | AirPrint 自动发现 |
-| macOS | AirPrint 自动发现 |
-| Windows | IPP / WSD 网络打印机 |
-| Android | IPP APP（如 "CUPS Print"） |
-| Linux | `lpadmin -p M100D -E -v ipp://IP:631/printers/M100D` |
 
 ### 测试打印
 
@@ -92,374 +75,159 @@ echo "Hello M100D!" | lp -d M100D
 
 ```bash
 sudo apt-get install gcc make
-
-wget https://www.cl.cam.ac.uk/~mgk25/jbigkit/download/jbigkit-2.1.tar.gz
-tar xzf jbigkit-2.1.tar.gz
-
-make          # 编译静态二进制
-sudo make install   # 安装
-```
-
-### 交叉编译（x86-64 → aarch64）
-
-```bash
-sudo apt-get install gcc-aarch64-linux-gnu
-
-# 编译 JBIG 对象
-aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -c jbigkit-2.1/libjbig/jbig85.c -o jbig85.o
-aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -c jbigkit-2.1/libjbig/jbig_ar.c -o jbig_ar.o
-
-# 编译过滤器
-aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
-    rastertolhplh.c jbig85.o jbig_ar.o -lm -static
-```
-
-## 支持的打印机
-
-| 型号 | USB PID | 状态 |
-|------|---------|------|
-| Lenovo M100D | 5444 | 主要目标 |
-| Lenovo M100DNA | — | 同协议 |
-| Lenovo L100D | 5442 | 同协议 |
-| Lenovo L100DW | 5443 | 同协议 |
-| Lenovo M1520D | — | 同协议 |
-| Lenovo M1688DW | — | 同协议 |
-
-## PJL/LHPLH 协议格式
-
-### 完整输出结构
-
-```
-┌──────────────────────────────────────────────────┐
-│  PJL 作业控制头 (匹配 Debian 驱动)                 │
-│  ├─ UEL + @PJL JOB NAME=PRINTER                  │
-│  ├─ @PJL SET JOBATTR=HST:<hostname>              │
-│  ├─ @PJL SET JOBATTR=USR:<username>              │
-│  ├─ @PJL SET JOBATTR=DOC:<title>                 │
-│  ├─ @PJL SET JOBATTR=DATE:<MM/DD/YYYY>           │
-│  ├─ @PJL SET JOBATTR=TIME:<HH:MM:SS>             │
-│  ├─ @PJL SET DUPLEX=<ON|OFF>                     │
-│  ├─ @PJL SET MEDIASOURCE=0                       │
-│  ├─ @PJL SET RENDERMODE=GRAYSCALE                │
-│  ├─ @PJL SET RESOLUTION=<600|1200>               │
-│  ├─ @PJL SET BITSPERPIXEL=1                      │
-│  ├─ @PJL SET COPIES=<n>                          │
-│  └─ @PJL ENTER LANGUAGE=LHPL                     │
-├──────────────────────────────────────────────────┤
-│  LHPLH @sj 命令帧 (64 bytes)                      │
-│  ├─ 前缀: 1b 4c 48 40 73 6a (ESC LH @sj)         │
-│  ├─ byte[6]=0x01, byte[8]=copies                  │
-│  └─ byte[63]=XOR校验 (bytes 0-62)                 │
-├──────────────────────────────────────────────────┤
-│  LHPLH @sp 命令帧 (变长)                           │
-│  ├─ @sp 头部 (64 bytes)                           │
-│  │   ├─ 前缀: 1b 4c 48 40 73 70 (ESC LH @sp)     │
-│  │   ├─ SHORT[6]  = 0x0100 (page type)            │
-│  │   ├─ DWORD[8]  = 4768 (打印区域宽度, 32-bit LE) │
-│  │   ├─ DWORD[12] = page_height (32-bit LE)       │
-│  │   ├─ DWORD[16] = uncompressed_size (32-bit LE) │
-│  │   ├─ DWORD[20] = compressed_size (32-bit LE)   │
-│  │   ├─ DWORD[24] = compressed_size2 (32-bit LE)  │
-│  │   ├─ SHORT[42] = resolution (16-bit LE)        │
-│  │   ├─ SHORT[44] = 0x0833 (打印机常量)            │
-│  │   ├─ SHORT[46] = 0x0b9a (打印机常量)            │
-│  │   └─ byte[63]=XOR校验 (bytes 0-62)             │
-│  ├─ JBIG 参数头 (20 bytes, LHPLH 自定义格式)       │
-│  │   ├─ DWORD[0] = 0x00000100 (flags)             │
-│  │   ├─ DWORD[1] = 4768 (打印区域宽度, BE)         │
-│  │   ├─ DWORD[2] = page_height (BE)               │
-│  │   ├─ DWORD[3] = L0=128 (stripe height, BE)     │
-│  │   └─ DWORD[4] = 0x08000040 (byte[16]=0x08=TPBON, │
-│  │        byte[17]=0, byte[18]=0, byte[19]=MX=64)  │
-│  └─ JBIG T.85 压缩数据 (SDRST 终止)               │
-├──────────────────────────────────────────────────┤
-│  LHPLH @ep 命令帧 (64 bytes)                      │
-│  ├─ 前缀: 1b 4c 48 40 65 70 (ESC LH @ep)         │
-│  ├─ byte[8]=0x00, byte[15]=0x00                   │
-│  └─ byte[63]=XOR校验 (bytes 0-62)                 │
-├──────────────────────────────────────────────────┤
-│  \x1b%-12345X@PJL EOJ\r\n                         │
-└──────────────────────────────────────────────────┘
-```
-
-### 关键协议细节
-
-| 项目 | 值 |
-|------|----|
-| PJL 行尾 | `\r\n`（0x0D 0x0A） |
-| PJL 语言标识 | `LHPL`（不是 LHPLH） |
-| PJL SET 顺序 | DUPLEX→MEDIASOURCE→RENDERMODE→RESOLUTION→BITSPERPIXEL→COPIES（匹配 Debian 驱动） |
-| PJL EOJ | `\x1b%-12345X@PJL EOJ\r\n`（含 UEL 前缀） |
-| LHPLH 命令帧大小 | @sj/@ep 固定 64 字节，@sp 变长 |
-| @sp 头部字段 | 偏移 8+ 为 **32-bit LE DWORD**（非 16-bit） |
-| @sp 打印区域宽度 | 固定 **4768**（600 DPI，非 CUPS Raster 宽度 4760） |
-| @sp compressed_size | JBIG 数据大小（不含 BIE 头） |
-| @sp 纸张尺寸 | SHORT[44]=0x0833=2099, SHORT[46]=0x0b9a=2970（0.1mm 单位） |
-| @sp JBIG 子头 | LHPLH 自定义格式：byte[16]=options(0x08=TPBON), byte[19]=MX（非标准 BIE） |
-| JBIG 压缩参数 | MX=64, L0=128, TPBON=ON (options=0x08) |
-| JBIG 终止标记 | SDRST (0xFF 0x03) |
-| @ep byte[8] | 0x00（匹配 Debian 驱动） |
-| @ep byte[15] | 0x00（匹配 Debian 驱动） |
-| XOR 校验 | `byte[63] = bytes[0..62]` 逐字节异或 |
-| 页面宽度对齐 | CUPS Raster 4760px → 填充到 4768px（右侧填零/白） |
-
-## 资源占用
-
-| 指标 | 数值 |
-|------|------|
-| 二进制大小 | 660KB（aarch64 静态链接） |
-| 每页内存 | ~2MB |
-| 总安装大小 | ~1MB（过滤器 + PPD） |
-| 编译依赖 | 仅 `gcc` + `make`（无需 libcups-dev！） |
-| 运行时依赖 | **无**（完全静态链接） |
-
-## 测试验证
-
-与原始 Debian 驱动 (`lnthr8zfilter.app`) 使用相同 CUPS Raster 输入对比：
-
-| 组件 | 结果 |
-|------|------|
-| @sj 命令帧 | ✅ 完全一致 |
-| @sp 头部（静态字段） | ✅ 完全一致 |
-| BIE 子头 byte[16] | ✅ 0x08 (TPBON，匹配已验证的 Windows 驱动) |
-| @ep byte[8], byte[15] | ✅ 0x00, 0x00（已修正） |
-| PJL 尾部 | ✅ 完全一致 |
-| JBIG 编码 | ✅ 标准 jbigkit-2.1，TPBON=ON，标准 T.85 兼容 |
-| x86 回环解码 | ✅ jbgtopbm85 解码像素分布完全正确 |
-
-### JBIG TPBON 说明（**「黑噪」最终根因**）
-
-打印机固件的 JBIG 解码器在 **TPBON 开启 (0x08)** 模式下运行。证据来自能正常打印的官方 Windows 驱动：其 `@sp` JBIG 子头 byte[16] = `0x08`（JBG_TPBON），byte[19] = `0x40`（MX=64）。
-
-因此过滤器的 JBIG 编码器与 `@sp` 子头 byte[16] 必须保持同步：两者**同时**启用 TPBON。如果三者不一致（编码器无 TPBON / 子头字节[16]=0x00），算术解码器会立即失同步，纸张上出现随机的**黑色噪点**、看不到可读文字 — 这正是本项目长期遇到的问题。
-
-Debian 官方驱动抓包使用 byte[16]=`0x00`（无 TPBON），但它在实物 M100D 上从未被验证过能够正确打印，不应当作解码目标。本项目改为严格匹配已知的 Windows 驱动，这是本项目「黑噪」问题的最终根因修复。
-
-| 配置 | 编码器 options | @sp byte[16] | 在 M100D 上打印 |
-|------|----------------|--------------|------------------|
-| 官方 Windows 驱动（金本） | 未公开 | 0x08 (TPBON) | ✅ 正常 |
-| Debian/UOS 抓包 | 未公开 | 0x00 | ❓ 未在实物验证 |
-| 旧代码 | 0 (无 TPBON) | 0x00 | ❌ 黑噪 |
-| **修复后** | **0x08 (TPBON)** | **0x08** | 🔬 待纸张确认 |
-
-验证项：PJL 格式 ✅ · @sj/@sp/@ep 命令帧 ✅ · XOR 校验 ✅ · @sp 32-bit LE 字段 ✅ · BIE 子头 (byte[16]=0x08) ✅ · JBIG 参数 (L0=128, MX=64, TPBON) ✅ · SDRST 终止 ✅ · @PJL EOJ ✅ · 页面宽度 4768 ✅ · x86 JBIG 回环解码像素分布正确 ✅
-
-## 故障排查
-
-| 现象 | 可能原因 | 解决方法 |
-|------|---------|---------|
-| 打印机无反应 | USB 权限问题 | `lsusb` 检查，确认 udev 规则 |
-| 打印机无反应 | CUPS 用了 libusb 后端 | 改用 usblp 内核驱动 + `file:///dev/usb/lp0` 或 `socket://localhost:9100` + socat |
-| 输出乱码/全黑 | JBIG 参数不对 | 调整源码中 L0、MX 值 |
-| 打印一半停止 | ABORT 标记问题 | 已修复为 SDRST (0xFF 0x03) 终止 |
-| CUPS 报错 | 查看日志 | `cat /var/log/cups/error_log \| tail -50` |
-| 找不到打印机 | CUPS 未识别 | `sudo lpinfo -l -v` 检查 USB URI |
-| 打印机红绿灯闪烁 | 发送了错误数据 | 断电重启打印机（拔电源线 10 秒） |
-| PWG Raster 不识别 | cspace 18/19 未处理 | 已修复，支持 PWG gray/RGB |
-
-## 技术细节
-
-| 项目 | 值 |
-|------|----|
-| 协议 | GDI（IEEE 1284 Device ID: CMD:GDI） |
-| 页面语言 | LHPLH（`@PJL ENTER LANGUAGE=LHPL`） |
-| 压缩 | JBIG-KIT 2.1 T.85（GPLv2+），MX=64, L0=128, SDRST 终止 |
-| 命令帧格式 | ESC LH @sj/@sp/@ep，64 字节固定头 + XOR 校验 |
-| @sp 头部字段 | 32-bit LE DWORD（page_width=4768/height/sizes） |
-| @sp JBIG 子头 | LHPLH 自定义格式：byte[16]=options(0x08=TPBON), byte[19]=MX(64) |
-| @sp byte[6] | 0x00（page type，匹配 Debian 驱动） |
-| 页面宽度 | 固定 4768（600 DPI），CUPS 4760px 填充到 4768px |
-| PJL 行尾 | `\r\n`（0x0D 0x0A） |
-| CUPS Raster 读取器 | 内嵌（无需 libcups 依赖），支持 PWG Raster (RaS2/RaS3) |
-| NegativePrint | PPD 中 `NegativePrint true`，半色调适配反转像素值 |
-| 链接方式 | `-lm -static`，零运行时 `.so` 依赖 |
-
-## 逆向工程过程
-
-1. 下载官方驱动 `L100_Series_drivers_Lin_20210511095611.7z`
-2. 提取 `lnthr8zfilter.app`（已剥离符号）和 `liblnthr8zcl.so`（**未剥离**，655+ 导出符号）
-3. 在 x86-64 机器上安装原厂驱动，通过 CUPS `file:/` 后端抓包获取完整协议输出
-4. 识别 LHPLH 命令帧格式（@sj/@sp/@ep + XOR 校验）、JBIG T.85 压缩参数（MX=64, L0=128）
-5. 确认 @sp 头部字段为 **32-bit LE**（非 16-bit）——原厂小测试页值恰好能存入 16-bit，全页输出才暴露
-6. 确认 JBIG 终止标记为 **SDRST (0xFF 0x03)**
-7. 确认 BIE 子头为 LHPLH 自定义格式：byte[16]=options(0x08=TPBON), byte[19]=MX=64（非标准 BIE）
-8. 确认打印区域宽度固定为 **4768**（非 CUPS Raster 宽度 4760），需右侧填零对齐
-9. 确认 @ep byte[8]=0x00, byte[15]=0x00（匹配 Debian 驱动，非 Windows 驱动的 0x06/0x80）
-10. 编写独立 CUPS 过滤器，内嵌 CUPS Raster 读取器，支持 PWG Raster
-11. 与原始 Debian 驱动对比：@sj/@sp/@ep/BIE 子头完全一致，JBIG 编码更高效
-
-## 许可证
-
-- **本项目代码**：MIT License
-- **JBIG-KIT 2.1**（jbig85.c / jbig_ar.c）：GPLv2+
-
-编译后的二进制包含 JBIG-KIT 代码，因此分发时整体适用 GPLv2。源码层面本项目采用 MIT 许可。
-
-## 免责声明
-
-本项目为逆向工程实现。PJL/LHPLH 协议通过分析官方 `lnthr8zfilter.app` 二进制推导得出，与实际打印机的兼容性需在真实硬件上验证。使用风险自负。
-
----
-
-<a id="english"></a>
-
-## Background
-
-Lenovo M100D / L100D series printers use the **GDI protocol** (host-based rendering). The official driver only provides a closed-source x86-64 CUPS filter `lnthr8zfilter.app`, making it completely unusable on ARM devices (Snapdragon 410, Raspberry Pi, etc.).
-
-This project reverse-engineers the official Debian driver's PJL/LHPLH protocol and implements a fully standalone ARM-native CUPS filter — **statically linked, zero runtime dependencies**, running smoothly even on 512MB RAM + 4GB storage devices.
-
-## Quick Start
-
-```bash
-git clone https://github.com/shengshimeiyan/m100d-arm-filter.git
-cd m100d-arm-filter
-sudo bash install.sh
-```
-
-## Build from Source
-
-```bash
-# Only gcc + make needed (no libcups-dev!)
-sudo apt-get install gcc make
 wget https://www.cl.cam.ac.uk/~mgk25/jbigkit/download/jbigkit-2.1.tar.gz
 tar xzf jbigkit-2.1.tar.gz
 make
 sudo make install
 ```
 
-## Cross-Compile (x86-64 → aarch64)
+### 交叉编译（x86-64 → aarch64）
 
 ```bash
 sudo apt-get install gcc-aarch64-linux-gnu
-
-# Compile JBIG objects
-aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -c jbigkit-2.1/libjbig/jbig85.c -o jbig85.o
-aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -c jbigkit-2.1/libjbig/jbig_ar.c -o jbig_ar.o
-
-# Compile filter
-aarch64-linux-gnu-gcc -O2 -Ijbigkit-2.1/libjbig -o rastertolhplh \
-    rastertolhplh.c jbig85.o jbig_ar.o -lm -static
+aarch64-linux-gnu-gcc -O2 -Wall -Wextra -std=c11 -Ijbigkit-2.1/libjbig \
+    -c jbigkit-2.1/libjbig/jbig85.c -o jbig85.o
+aarch64-linux-gnu-gcc -O2 -Wall -Wextra -std=c11 -Ijbigkit-2.1/libjbig \
+    -c jbigkit-2.1/libjbig/jbig_ar.c -o jbig_ar.o
+aarch64-linux-gnu-gcc -O2 -Wall -Wextra -std=c11 -Ijbigkit-2.1/libjbig \
+    -o rastertolhplh rastertolhplh.c jbig85.o jbig_ar.o -lm -static
 ```
 
-## Print Server (AirPrint)
+## 支持的打印机
 
-```bash
-sudo bash setup-print-server.sh
-```
+| 型号 | USB PID | 状态 |
+|------|---------|------|
+| Lenovo M100D | 17ef:5444 | ✅ 实物验证（USB 直写 + CUPS lp 路径） |
+| Lenovo M100DNA | — | 同协议 |
+| Lenovo L100D | 17ef:5442 | 同协议 |
+| Lenovo L100DW | 17ef:5443 | 同协议 |
+| Lenovo M1520D | — | 同协议 |
+| Lenovo M1688DW | — | 同协议 |
 
-Enables AirPrint/IPP sharing — all devices on your LAN can print directly.
+## PJL/LHPLH 协议格式（最终确认版）
 
-## Supported Printers
-
-Lenovo M100D, M100DNA, L100D, L100DW, M1520D, M1688DW (all share the same LHPLH GDI protocol).
-
-## PJL/LHPLH Protocol Format
-
-### Output Structure
+### 完整输出结构
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  PJL Job Control Header (matches Debian driver)   │
+│  PJL 作业控制头                                   │
 │  ├─ UEL + @PJL JOB NAME=PRINTER                  │
-│  ├─ @PJL SET JOBATTR=HST/USR/DOC/DATE/TIME       │
-│  ├─ @PJL SET DUPLEX/MEDIASOURCE/RENDERMODE/...   │
+│  ├─ @PJL SET JOBATTR=HST:<hostname>              │
+│  ├─ @PJL SET JOBATTR=USR:<username>              │
+│  ├─ @PJL SET JOBATTR=DOC:<title>                 │
+│  ├─ @PJL SET JOBATTR=DATE/TIME                   │
+│  ├─ @PJL SET MEDIASOURCE=0                       │
+│  ├─ @PJL SET DUPLEX=OFF                          │
+│  ├─ @PJL SET MDPXS=0                             │
+│  ├─ @PJL SET BITSPERPIXEL=1                      │
+│  ├─ @PJL SET COPIES=<n>                          │
+│  ├─ @PJL SET RESOLUTION=<600|1200>               │
+│  ├─ @PJL SET RENDERMODE=GRAYSCALE                │
 │  └─ @PJL ENTER LANGUAGE=LHPL                     │
 ├──────────────────────────────────────────────────┤
-│  LHPLH @sj Command Frame (64 bytes)               │
-│  ├─ Prefix: 1b 4c 48 40 73 6a (ESC LH @sj)       │
-│  ├─ byte[6]=0x01, byte[8]=copies                  │
-│  └─ byte[63]=XOR checksum (bytes 0-62)            │
+│  LHPLH @sj 命令帧 (64 bytes, 全零+XOR 校验)       │
 ├──────────────────────────────────────────────────┤
-│  LHPLH @sp Command Frame (variable length)        │
-│  ├─ @sp Header (64 bytes)                         │
-│  │   ├─ SHORT[6]  = 0x0100 (page type)            │
-│  │   ├─ DWORD[8]  = 4768 (printable width, 32-bit LE) │
-│  │   ├─ DWORD[12] = page_height (32-bit LE)       │
-│  │   ├─ DWORD[16] = uncompressed_size (32-bit LE) │
-│  │   ├─ DWORD[20] = compressed_size (32-bit LE)   │
-│  │   ├─ DWORD[24] = compressed_size2 (32-bit LE)  │
-│  │   ├─ SHORT[42] = resolution (16-bit LE)        │
-│  │   ├─ SHORT[44] = 0x0833 (printer constant)     │
-│  │   ├─ SHORT[46] = 0x0b9a (printer constant)     │
-│  │   └─ byte[63]=XOR checksum (bytes 0-62)        │
-│  ├─ JBIG Parameters Header (20 bytes, LHPLH custom)│
-│  │   ├─ DWORD[0] = 0x00000100 (flags)             │
-│  │   ├─ DWORD[1] = 4768 (printable width, BE)     │
-│  │   ├─ DWORD[2] = page_height (BE)               │
-│  │   ├─ DWORD[3] = L0=128 (stripe height, BE)     │
-│  │   └─ DWORD[4] = 0x08000040 (byte[16]=0x08=TPBON, │
-│  │        byte[17]=0, byte[18]=0, byte[19]=MX=64)  │
-│  └─ JBIG T.85 Compressed Data (SDRST termination) │
+│  LHPLH @sp 命令帧                                 │
+│  ├─ @sp 头部 (64 bytes)                          │
+│  │   ├─ 前缀: 1b 4c 48 40 73 70 (ESC LH @sp)     │
+│  │   ├─ SHORT[6]  = 0x0102 (page type, Windows)  │
+│  │   ├─ DWORD[8]  = page_width (LE)              │
+│  │   ├─ DWORD[12] = page_height (LE)             │
+│  │   ├─ DWORD[16] = uncompressed_size (LE)       │
+│  │   ├─ DWORD[20] = compressed_size = JBIG 总长 (LE) │
+│  │   ├─ SHORT[42] = resolution                   │
+│  │   ├─ SHORT[44] = 0x0834 (210.0mm, Windows)    │
+│  │   ├─ SHORT[46] = 0x0b9a (297.0mm)             │
+│  │   └─ byte[63]  = XOR 校验                     │
+│  ├─ 标准 JBIG BIH (20 bytes, 不剥离！)            │
+│  │   ├─ byte[4-7]  = width = 5120 (BE)           │
+│  │   ├─ byte[8-11] = height (BE)                 │
+│  │   ├─ byte[12-15] = L0 = 128                   │
+│  │   ├─ byte[16] = MX = 8                        │
+│  │   └─ byte[19] = options = 0x40 (LRLTWO)       │
+│  └─ JBIG T.85 压缩数据 (每 stripe SDRST)          │
 ├──────────────────────────────────────────────────┤
-│  LHPLH @ep Command Frame (64 bytes)               │
-│  ├─ Prefix: 1b 4c 48 40 65 70 (ESC LH @ep)       │
-│  ├─ byte[8]=0x00, byte[15]=0x00                   │
-│  └─ byte[63]=XOR checksum (bytes 0-62)            │
+│  LHPLH @ep 命令帧 (64 bytes, 全零+XOR 校验)       │
 ├──────────────────────────────────────────────────┤
 │  \x1b%-12345X@PJL EOJ\r\n                         │
 └──────────────────────────────────────────────────┘
 ```
 
-### Key Protocol Details
+### 关键协议细节（与 Windows 驱动逐字节对齐）
 
-| Item | Value |
-|------|-------|
-| PJL line ending | `\r\n` (0x0D 0x0A) |
-| PJL language identifier | `LHPL` (not LHPLH) |
-| PJL SET order | DUPLEX→MEDIASOURCE→RENDERMODE→RESOLUTION→BITSPERPIXEL→COPIES (matches Debian driver) |
-| PJL EOJ | `\x1b%-12345X@PJL EOJ\r\n` (with UEL prefix) |
-| LHPLH command frame size | @sj/@ep fixed 64 bytes, @sp variable |
-| @sp header fields | 32-bit LE DWORDs at offset 8+ (not 16-bit) |
-| @sp printable width | Fixed **4768** (600 DPI, not CUPS raster width 4760) |
-| @sp compressed_size | JBIG data size (not including BIE header) |
-| @sp paper dimensions | SHORT[44]=0x0833=2099, SHORT[46]=0x0b9a=2970 (0.1mm units) |
-| @sp JBIG sub-header | LHPLH custom format: byte[16]=options(0x08=TPBON), byte[19]=MX (not standard BIE) |
-| JBIG compression params | MX=64, L0=128, TPBON=ON (options=0x08) |
-| JBIG termination marker | SDRST (0xFF 0x03) |
-| @ep byte[8] | 0x00 (matches Debian driver) |
-| @ep byte[15] | 0x00 (matches Debian driver) |
-| XOR checksum | `byte[63] = XOR of bytes[0..62]` |
-| Page width alignment | CUPS Raster 4760px → padded to 4768px (right-filled with zeros/white) |
+| 项目 | 值 |
+|------|----|
+| PJL 语言标识 | `LHPL` |
+| @sj 帧 | `ESC LH@sj` + 全零 + XOR 校验（与 Windows 完全一致） |
+| @sp hdr[6-7] | `0x0102`（Windows 实测，非 Debian 的 0x0100） |
+| @sp hdr[44-45] | `0x0834` = 210.0mm（Windows，非 Debian 的 0x0833） |
+| @sp 后 | **标准 JBIG BIH**（不剥离、非自定义头） |
+| BIH byte16 | `0x08` = MX=8（与 Windows prn 一致） |
+| BIH byte19 | `0x40` = LRLTWO（与 Windows prn 一致） |
+| compressed_size | JBIG 总长（**含 BIH**，非 +20） |
+| JBIG 终止 | SDRST (0xFF 0x03)，每 stripe 一个 |
+| @ep 帧 | `ESC LH@ep` + **全零** + XOR 校验（移除 Debian 遗留 0x06/0x80） |
 
-## Testing
+## 逆向工程依据
 
-Compared against the original Debian driver (`lnthr8zfilter.app`) using identical CUPS Raster input:
+- **Windows 官方驱动** `LNTHR9Zfm.dll`（LenovoPrint Z26 系列安装包）完整反汇编，见 [`analysis/windows-driver/README.md`](analysis/windows-driver/README.md)：
+  - JBIG 编码器：硬编码 MX=8、options=0x340（LRLTWO）
+  - 每 stripe SDRST
+  - 页面顶部 4 个空白 stripe（512 行）
+  - LHPL 帧结构（ESC LH@sp、XOR 校验）
+- **Windows prn 抓包**（`captures/windows-original-driver.prn`）：字节级对比基准
+- **实物打印测试**：定位页测量打印机物理映射、网格页验证居中/无裁剪
 
-| Component | Result |
-|-----------|--------|
-| @sj command frame | ✅ Identical |
-| @sp header (static fields) | ✅ Identical |
-| BIE sub-header byte[16] | ✅ 0x08 (TPBON, matches sanctioned Windows driver) |
-| @ep byte[8], byte[15] | ✅ 0x00, 0x00 (fixed) |
-| PJL trailer | ✅ Identical |
-| JBIG encoding | ✅ Standard jbigkit-2.1, TPBON=ON, T.85 compliant |
-| x86 round-trip | ✅ jbgtopbm85 decodes correct pixel distribution |
+## 资源占用
 
-### JBIG TPBON notes (**the final root cause of "black noise"**)
+| 指标 | 数值 |
+|------|------|
+| 二进制大小 | ~660KB（aarch64 静态链接） |
+| 每页内存 | ~2MB |
+| 运行时依赖 | **无**（完全静态链接） |
 
-The printer firmware's JBIG decoder runs with **TPBON ON (0x08)**. Evidence: the official Windows driver — the only capture confirmed to print correctly on the physical M100D — sets its `@sp` JBIG sub-header byte[16] = `0x08` (JBG_TPBON), byte[19] = `0x40` (MX=64).
+## 测试验证（实物 M100D）
 
-So the filter's JBIG encoder and the `@sp` sub-header byte[16] must stay in lock-step: **both** enable TPBON. If the two disagree (encoder without TPBON / byte[16]=0x00), the arithmetic decoder desynchronises immediately and the page comes out as random **black noise** with no readable text — exactly the symptom this project hit.
+| 测试 | 结果 |
+|------|------|
+| Windows prn 原始文件直写 | ✅ 出纸 |
+| 空白页 | ✅ 出纸 |
+| 网格定位页 | ✅ 居中、无裁剪、均匀 |
+| 中文/英文文字页 | ✅ 正常 |
+| 顶部 padding 128 vs 512 | ✅ 128 足够 |
+| CUPS `lp` 打印文本 | ✅ 正常（32bpp 提取 + 极性修复后） |
 
-The Debian/UOS capture uses byte[16]=`0x00` (no TPBON) but was never verified to print correctly on real hardware, so it must not be used as the decode target. This project now strictly matches the known-good Windows driver — this is the final root-cause fix for the "black noise".
+## 故障排查
 
-| config | encoder options | @sp byte[16] | prints on M100D |
-|--------|----------------|---------------|------------------|
-| official Windows driver (gold) | unobserved | 0x08 (TPBON) | ✅ correct |
-| Debian/UOS capture | unobserved | 0x00 | ❓ never verified |
-| old project code | 0 (no TPBON) | 0x00 | ❌ black noise |
-| **after fix** | **0x08 (TPBON)** | **0x08** | 🔬 pending paper |
+| 现象 | 可能原因 | 解决方法 |
+|------|---------|---------|
+| 轰鸣不出纸 | 页面顶部无空白 stripe | 保持 `TOP_PAD` ≥ 128 |
+| 标题/顶部内容丢失 | 白首行 stripe 失步 | 保持白首行 workaround 开启 |
+| 黑底白字 | CUPS NegativePrint 极性 | filter 强制标准极性（已修复） |
+| 内容压缩到左侧 | 32bpp 输入未提取 | filter 自动检测提取（已修复） |
+| 右边/底部被裁 | 画布超可打印区 | 保持 `PRINTABLE_WIDTH`=4651 |
 
-Verified items: PJL format ✅ · @sj/@sp/@ep command frames ✅ · XOR checksums ✅ · @sp 32-bit LE fields ✅ · BIE sub-header (byte[16]=0x08) ✅ · JBIG params (L0=128, MX=64, TPBON) ✅ · SDRST termination ✅ · @PJL EOJ ✅ · Page width 4768 ✅ · x86 JBIG round-trip decode verified ✅
+---
 
-## License
+<a id="english"></a>
 
-- **This project's code**: MIT License
-- **JBIG-KIT 2.1** (jbig85.c / jbig_ar.c): GPLv2+
+## English
 
-Compiled binaries include JBIG-KIT code, so distribution of binaries is subject to GPLv2. The source code itself is MIT licensed.
+**rastertolhplh** — a standalone ARM-native CUPS filter for Lenovo M100D/L100D GDI printers.
 
-## Disclaimer
+Fully reverse-engineered from the official Windows driver (`LNTHR9Zfm.dll`) and verified on physical hardware:
 
-This is a reverse-engineered implementation. The PJL/LHPLH protocol was derived by analyzing the official `lnthr8zfilter.app` binary. Compatibility with actual printers must be verified on real hardware. Use at your own risk.
+- **Protocol**: PJL + LHPLH frames (`ESC LH@sj/@sp/@ep`), byte-aligned with the Windows driver
+- **JBIG**: LRLTWO + MX=8, standard BIH kept, SDRST per stripe
+- **Firmware workarounds** (discovered via physical testing):
+  - 128 blank rows at page top (`TOP_PAD`)
+  - White-first-stripe fix (copy first non-white row to stripe's first row)
+  - Printable area 4651×6755px (origin at 6.55mm/11.08mm)
+- **CUPS input**: 8bpp gray, 1bpp W/K, or 32bpp RGBA-gray (auto-detected)
+- **Static binary**: zero runtime dependencies, works on 512MB RAM devices
+
+```bash
+echo "Hello M100D!" | lp -d M100D
+```
+
+See [`REVERSE-ENGINEERING-STATUS.md`](REVERSE-ENGINEERING-STATUS.md) and [`analysis/windows-driver/README.md`](analysis/windows-driver/README.md) for details.
