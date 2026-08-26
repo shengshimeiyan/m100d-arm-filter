@@ -57,6 +57,26 @@ cd m100d-arm-filter
 sudo bash install.sh
 ```
 
+### 方式 2：deb 包安装（推荐）
+
+从 [GitHub Releases](https://github.com/shengshimeiyan/m100d-arm-filter/releases) 下载
+`m100d-rastertolhplh_3.0.0_arm64.deb`，在 ARM Debian/Ubuntu 上：
+
+```bash
+sudo dpkg -i m100d-rastertolhplh_3.0.0_arm64.deb
+# 若提示依赖问题：
+sudo apt-get -f install
+```
+
+自动完成：安装 filter + PPD + USB udev 规则 + 重启 CUPS。
+
+添加打印机并测试：
+
+```bash
+sudo lpadmin -p M100D -E -v usb://Lenovo/M100D -m lenovo-M100D-arm.ppd
+echo "Hello M100D!" | lp -d M100D
+```
+
 ### 配置为打印服务器（AirPrint）
 
 ```bash
