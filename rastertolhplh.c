@@ -506,7 +506,10 @@ static void halftone_line(const unsigned char *gray_in,
 {
     unsigned col;
     unsigned byte_idx = left_pad_bits / 8;
-    unsigned char byte_val = (left_pad_bits % 8) ? (0xFF << (8 - (left_pad_bits % 8))) : 0;
+    /* padding bits must be WHITE (0 in the bit buffer: 1=black).
+     * The old code set them to 0xFF<<n which made them black when
+     * left_pad_bits was not a multiple of 8. */
+    unsigned char byte_val = 0;
     unsigned bit_pos  = (left_pad_bits % 8) ? (7 - (left_pad_bits % 8)) : 7;
 
     for (col = 0; col < width; col++) {
@@ -572,17 +575,19 @@ static int write_page(FILE *fp, cups_raster_t *ras,
                 total_height);
     }
     unsigned lhplh_page_width = 5120;  /* match Windows prn BIE width */
-    /* M100D 打印机实测物理边距: 画布原点在纸张 (6.55mm, 11.08mm),
-     * 左右边距各 ~6.55mm (155px), 可打印宽度 4651px @600dpi。
-     * 内容在可打印区内居中，避免右侧超出纸张被裁。 */
-    unsigned printable_width = 4651;
-    const char *pw_env = getenv("PRINTABLE_WIDTH");
-    if (pw_env) {
-        unsigned v = (unsigned)atoi(pw_env);
-        if (v >= 500 && v <= 5120) printable_width = v;
+    /* M100D 打印机实测映射（定位页 + 方框页手工测量）:
+     * 画布 x=0 → 纸张 4.08mm, 600dpi 精确 (1px = 0.04219mm)。
+     * 纸张中心 105mm = 画布 (105-4.08)/0.04219 = 2392px。
+     * 内容中心对齐纸张中心，避免内容在纸张上偏左。
+     * （可打印区本身不对称: 左 4.08mm / 右 ~0, 所以不能只用可打印区居中） */
+    unsigned paper_center_px = 2392;
+    const char *pc_env = getenv("PAPER_CENTER_PX");
+    if (pc_env) {
+        unsigned v = (unsigned)atoi(pc_env);
+        if (v >= 500 && v <= 5000) paper_center_px = v;
     }
-    unsigned left_pad = (printable_width > width) ?
-                        (printable_width - width) / 2 : 0;
+    unsigned left_pad = (paper_center_px > width/2) ?
+                        paper_center_px - width/2 : 0;
     unsigned g_stripe_height = 128;  /* L0 */
     int      duplex     = header->Duplex;
     int      resolution = (header->HWResolution[0] >= 1200) ? 1200 : 600;

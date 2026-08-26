@@ -14,8 +14,10 @@ OFF_X_MM = 4.08
 TOP_MM = 11.08
 PAD_PX = 128
 
+FILTER_LEFT_PAD = 67  # filter: left_pad = 2392 - width/2 (width=4651)
 def mm2x(mm):
-    return int((mm - OFF_X_MM) / MM_PER_PX)
+    # 画布坐标 → raster 内坐标（filter 会加 FILTER_LEFT_PAD）
+    return int((mm - OFF_X_MM) / MM_PER_PX) - FILTER_LEFT_PAD
 def mm2y(mm):
     return int((mm - TOP_MM) / MM_PER_PX) - PAD_PX
 
