@@ -35,7 +35,7 @@
 |------|------|
 | **输入** | CUPS Raster v2（支持 8bpp 灰度 / 1bpp W/K / 32bpp RGBA 灰度） |
 | **半色调** | 8×8 Bayer 有序抖动 |
-| **固件 workaround** | 顶部 128 行空白 padding + 白首行 stripe 修复（见下） |
+| **固件 workaround** | 顶部 128 行空白 padding + JBIG SDRST 状态修复 |
 | **压缩** | JBIG T.85（jbigkit-2.1 修改版），**LRLTWO + MX=8 + SDRST** |
 | **输出** | PJL 作业控制 + LHPLH 命令帧（@sj/@sp/@ep） |
 
@@ -43,9 +43,9 @@
 
 物理打印机实测发现的 M100D 固件特性：
 
-1. **页面顶部必须 ≥1 个空白 stripe**（128 行 @600dpi）：否则打印机"轰鸣不出纸"。Windows 官方驱动使用 4 个空白 stripe（512 行）。过滤器自动在顶部添加 128 行空白（`TOP_PAD` 环境变量可调）。
-2. **stripe 首行为白但内含内容时，固件解码失步**（该 stripe 及以下内容变空白）：过滤器复制该 stripe 第一非白行到首行。
-3. **可打印区**：实测打印机画布原点在纸张 (6.55mm, 11.08mm) 处，600dpi 精确映射，可打印区 **4651×6755px**。内容居中于可打印区（`PRINTABLE_WIDTH` 环境变量可调）。
+1. **页面顶部必须 ≥1 个空白 stripe**（128 行 @600dpi）：否则打印机"轰鸣不出纸"。过滤器自动添加 128 行空白。
+2. **SDRST 条带状态必须兼容 M100D 固件**：保留 arithmetic probability state，只重置条带本地参考状态。
+3. **可打印区**：实测 M100D 的有效高度约为 **6755px**（600dpi）。输入过长时过滤器裁剪到该边界。
 
 ## 快速开始
 
@@ -241,8 +241,8 @@ Fully reverse-engineered from the official Windows driver (`LNTHR9Zfm.dll`) and 
 - **JBIG**: LRLTWO + MX=8, standard BIH kept, SDRST per stripe
 - **Firmware workarounds** (discovered via physical testing):
   - 128 blank rows at page top (`TOP_PAD`)
-  - White-first-stripe fix (copy first non-white row to stripe's first row)
-  - Printable area 4651×6755px (origin at 6.55mm/11.08mm)
+  - JBIG SDRST workaround: preserve arithmetic state and reset only stripe-local reference state
+  - Printable height 6755px (600dpi)
 - **CUPS input**: 8bpp gray, 1bpp W/K, or 32bpp RGBA-gray (auto-detected)
 - **Static binary**: zero runtime dependencies, works on 512MB RAM devices
 

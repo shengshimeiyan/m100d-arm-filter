@@ -1,0 +1,61 @@
+--- jbigkit-2.1/libjbig/jbig85.h
++++ jbigkit-2.1/libjbig/jbig85.h
+@@ -78,6 +78,7 @@
+   unsigned long c_all, c[128];    /* adaptive template algorithm variables */
+   int new_tx;            /* -1 = no ATMOVE pending, otherwise new TX value */
+   int ltp_old;                           /* true if line y-1 was "typical" */
++  int stripe_start;   /* first line after an SDRST marker */
+   struct jbg_arenc_state s;                   /* arithmetic encoder status */
+   void (*data_out)(unsigned char *start, size_t len, void *file);
+                                                     /* data write callback */
+--- jbigkit-2.1/libjbig/jbig85.c
++++ jbigkit-2.1/libjbig/jbig85.c
+@@ -117,6 +117,7 @@
+   s->y = 0;
+   s->i = 0;
+   s->ltp_old = 0;
++  s->stripe_start = 1;
+
+   /* initialize arithmetic encoder */
+   arith_encode_init(&s->s, 0);
+@@ -234,6 +235,15 @@
+   /* things that need to be done before the next SDE is encoded */
+   if (s->i == 0) {
+
++    /* M100D SDRST workaround: reset references only at the actual stripe
++     * boundary. The Windows stream keeps arithmetic probability state
++     * continuous while resetting stripe-local prediction rows. */
++    if (s->stripe_start) {
++      prevline = NULL;
++      prevprevline = NULL;
++      s->stripe_start = 0;
++    }
++
+     /* output NEWLEN if there is any pending */
+     output_newlen(s);
+
+@@ -274,7 +284,7 @@
+       s->new_tx = -1; /* we have yet to determine ATMOVE ... */
+     }
+
+-    /* restart arithmetic encoder */
++    /* Keep arithmetic probability state across M100D SDRST. */
+     arith_encode_init(&s->s, 1);
+   }
+
+@@ -442,12 +452,11 @@
+     buf[1] = MARKER_SDRST;
+     s->data_out(buf, 2, s->file);
+     s->i = 0;
++    s->stripe_start = 1;
+
+-    /* mirror decoder-side SDRST reset (finish_sde): arith stats, AT, ltp */
+-    arith_encode_init(&s->s, 0);
+-    s->tx = 0;
++    /* mirror decoder-side SDRST reset: keep arithmetic state, reset
++     * stripe-local prediction/reference state. */
+     s->ltp_old = 1;
+-    s->new_tx = -1;
+     /* output NEWLEN if there is any pending */
+     output_newlen(s);
+   }

@@ -19,9 +19,16 @@ CUPS_PPD_DIR    = /usr/share/ppd/Lenovo
 TARGET  = rastertolhplh
 
 # ── Build ──
-.PHONY: all clean install uninstall
+.PHONY: all clean install uninstall prepare
 
 all: $(TARGET)
+
+prepare: $(JBIG_DIR)/jbig85.c
+	@if grep -q 'int stripe_start' $(JBIG_DIR)/jbig85.h; then :; else \
+		patch -p0 -s < patches/m100d-sdrst.patch; \
+	fi
+
+jbig85.o: prepare
 
 jbig85.o: $(JBIG_DIR)/jbig85.c
 	@test -d $(JBIG_DIR) || (echo "" && \
