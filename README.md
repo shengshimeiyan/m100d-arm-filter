@@ -239,11 +239,15 @@ arm-linux-gnueabi-gcc -O2 -Wall -Wextra -std=c11 -Ijbig \
 | 顶部 padding 128 vs 512 | ✅ 128 足够 |
 | CUPS `lp` 打印文本 | ✅ 正常（32bpp 提取 + 极性修复后） |
 | 整页 JBIG（SDRST 修复编码器，v3.0.1） | ✅ 整页正常，无下部黑块 |
+| OpenStack aarch64 VM：IJS 客户端 → 过滤器 → fd 100 | ✅ BIH、SDRST、@sj/@sp/@ep 与 Windows 字节对齐 |
+
+> 2026-09 在 OpenStack Debian 11 aarch64 VM（Tailscale SSH）上验证：源码从 v3.0.1 tag 解压后单 `make` 即出包，IJS 服务器模式接收 4780×1 RGB 合成光栅后输出 627 字节 PJL/LHPLH/JBIG，BIH 字段 `width=5120 height=129 L0=128 MX=8 options=0x40` 与 Windows prn 基准（除 Y0）逐字节一致。
 
 ## 故障排查
 
 | 现象 | 可能原因 | 解决方法 |
 |------|---------|---------|
+| `dpkg: unknown compression for member 'control.tar.zst'` | Release 上的 .deb 是 zstd 压缩，Debian 11 `dpkg-deb` 不支持 | 已重新打包为 xz 压缩并重新上传；如仍有缓存请清 `~/.cache/` 后重下 |
 | 轰鸣不出纸 | 页面顶部无空白 stripe | 过滤器已内置 128 行顶部空白，使用 ≥ v3.0.1 |
 | 页面下部大块黑域/乱码 | JBIG SDRST 条带状态与固件不符 | v3.0.1 已修复（保留算术状态，仅重置参考行） |
 | 黑底白字 | CUPS NegativePrint 极性 | filter 强制标准极性（已修复） |
@@ -256,7 +260,7 @@ arm-linux-gnueabi-gcc -O2 -Wall -Wextra -std=c11 -Ijbig \
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
-| v3.0.1 | 2026-09-03 | JBIG `SDRST` 修复：保留 arithmetic probability state，仅重置条带参考行；新增 ARM32（armel）deb；`jbig/` 内置修改版 jbigkit 源码，`make` 即可构建 |
+| v3.0.1 | 2026-09-03 | JBIG `SDRST` 修复：保留 arithmetic probability state，仅重置条带参考行；新增 ARM32（armel）deb；`jbig/` 内置修改版 jbigkit 源码，`make` 即可构建；Release .deb 重新打包为 xz 压缩以兼容 Debian 11 `dpkg-deb` |
 | v3.0.0 | 2026-08 | 最终协议参数（MX=8、LRLTWO、标准 BIH）；CUPS `lp` 全路径实物验证 |
 | v2.x | — | 早期不完整逆向（MX=64/TPBON 等），已被 v3.0.0 取代 |
 
