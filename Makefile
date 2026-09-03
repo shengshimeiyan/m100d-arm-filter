@@ -2,7 +2,7 @@
 # Replaces the proprietary lnthr8zfilter.app (x86-64 only)
 #
 # This filter is STANDALONE — no libcups/libcupsimage dependency.
-# Only needs: gcc, jbigkit-2.1 source, and libm (math)
+# The patched jbigkit-2.1 sources are vendored in jbig/ — no download needed.
 #
 # Quick build on ARM device:
 #   make
@@ -12,29 +12,18 @@ CC      = gcc
 CFLAGS  = -O2 -Wall -Wextra -std=c11
 
 # ── Paths ──
-JBIG_DIR        = jbigkit-2.1/libjbig
+JBIG_DIR        = jbig
 CUPS_FILTER_DIR = /usr/lib/cups/filter
 CUPS_PPD_DIR    = /usr/share/ppd/Lenovo
 
 TARGET  = rastertolhplh
 
 # ── Build ──
-.PHONY: all clean install uninstall prepare
+.PHONY: all clean install uninstall
 
 all: $(TARGET)
 
-prepare: $(JBIG_DIR)/jbig85.c
-	@if grep -q 'int stripe_start' $(JBIG_DIR)/jbig85.h; then :; else \
-		patch -p0 -s < patches/m100d-sdrst.patch; \
-	fi
-
-jbig85.o: prepare
-
-jbig85.o: $(JBIG_DIR)/jbig85.c
-	@test -d $(JBIG_DIR) || (echo "" && \
-		echo "❌ jbigkit-2.1 not found! Run this first:" && \
-		echo "   wget https://www.cl.cam.ac.uk/~mgk25/jbigkit/download/jbigkit-2.1.tar.gz" && \
-		echo "   tar xzf jbigkit-2.1.tar.gz" && echo "" && exit 1)
+jbig85.o: $(JBIG_DIR)/jbig85.c $(JBIG_DIR)/jbig85.h
 	$(CC) $(CFLAGS) -I$(JBIG_DIR) -c $< -o $@
 
 jbig_ar.o: $(JBIG_DIR)/jbig_ar.c
