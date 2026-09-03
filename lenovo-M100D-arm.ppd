@@ -90,6 +90,14 @@
 *LeadingEdge Short: ""
 *DefaultLeadingEdge: Short
 
+*% == Input Source ==
+*OpenUI *InputSlot/Input Source: PickOne
+*OrderDependency: 12 AnySetup *InputSlot
+*DefaultInputSlot: Auto
+*InputSlot Auto/Automatic: ""
+*InputSlot Manual/Manual Feed: ""
+*CloseUI: *InputSlot
+
 *% == Resolution ==
 *OpenUI *DrvResolution/Image Quality: PickOne
 *OrderDependency: 20 AnySetup *DrvResolution
@@ -154,6 +162,9 @@
 *zh_CN.DrvDuplex DrvDuplexNoTumble/长边翻页: ""
 *zh_CN.DrvDuplex DrvDuplexTumble/短边翻页: ""
 *zh_CN.Translation MediaType/纸张类型: ""
+*zh_CN.Translation InputSlot/供纸方式: ""
+*zh_CN.InputSlot Auto/自动: ""
+*zh_CN.InputSlot Manual/手动: ""
 *zh_CN.MediaType Plain/普通纸: ""
 *zh_CN.MediaType PlainThick/普通厚纸: ""
 *zh_CN.MediaType Recycled/再生纸: ""

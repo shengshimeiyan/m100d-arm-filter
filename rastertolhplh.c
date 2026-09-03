@@ -32,7 +32,7 @@
 
 /* ── Constants ─────────────────────────────────────────────────────── */
 
-#define FILTER_VERSION   "2.0.0-arm64-standalone"
+#define FILTER_VERSION   "3.0.1-arm-standalone"
 #define MAX_PAGE_WIDTH   10000
 #define MAX_PAGE_HEIGHT  15000
 

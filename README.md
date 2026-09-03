@@ -60,10 +60,10 @@ sudo bash install.sh
 ### 方式 2：deb 包安装（推荐）
 
 从 [GitHub Releases](https://github.com/shengshimeiyan/m100d-arm-filter/releases) 下载
-`m100d-rastertolhplh_3.0.0_arm64.deb`，在 ARM Debian/Ubuntu 上：
+`m100d-rastertolhplh_3.0.1_arm64.deb`，在 ARM Debian/Ubuntu 上：
 
 ```bash
-sudo dpkg -i m100d-rastertolhplh_3.0.0_arm64.deb
+sudo dpkg -i m100d-rastertolhplh_3.0.1_arm64.deb
 # 若提示依赖问题：
 sudo apt-get -f install
 ```
