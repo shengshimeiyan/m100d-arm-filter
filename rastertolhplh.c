@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 /*
  * rastertolhplh - Standalone ARM-native CUPS filter for Lenovo M100D (LHPLH)
  *
@@ -25,14 +24,13 @@
 #include <signal.h>
 #include <time.h>
 #include <unistd.h>
-#include <poll.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <jbig85.h>
 
 /* ── Constants ─────────────────────────────────────────────────────── */
 
-#define FILTER_VERSION   "3.0.1-arm-standalone"
+#define FILTER_VERSION   "3.0.2-arm-standalone"
 #define MAX_PAGE_WIDTH   10000
 #define MAX_PAGE_HEIGHT  15000
 
@@ -150,11 +148,6 @@ static unsigned get_u32(const unsigned char *buf, unsigned offset, int swapped)
     return v;
 }
 
-static void put_u32(unsigned char *buf, unsigned offset, unsigned value)
-{
-    memcpy(buf + offset, &value, 4);
-}
-
 /* Parse the CUPS raster header, extracting only the fields we need */
 static int parse_header(const unsigned char *raw, int swapped, cups_header_subset_t *h)
 {
@@ -226,18 +219,6 @@ static int ras_read_header(cups_raster_t *ras, cups_header_subset_t *h)
     unsigned char raw[CUPS_HEADER_SIZE];
 
     if (!ras_read(ras, &sync, 4)) return 0;
-
-    {
-        static int dumped = 0;
-        if (!dumped) {
-            unsigned char sb[4];
-            memcpy(sb, &sync, 4);
-            fprintf(stderr, "SYNC bytes: %02x %02x %02x %02x\n",
-                    sb[0], sb[1], sb[2], sb[3]);
-            fflush(stderr);
-            dumped = 1;
-        }
-    }
 
     int swapped = 0;
     int is_pwg = 0;
@@ -329,38 +310,13 @@ static void jbig_data_out(unsigned char *start, size_t len, void *file)
 
 /* ── PJL output helpers ────────────────────────────────────────────── */
 
-/* Write the whole buffer, returning 0 on failure (downstream closed/EPIPE). */
-static int write_all(FILE *fp, const void *buf, size_t len)
+static void pjl_printf(FILE *fp, const char *fmt, ...)
 {
-    const unsigned char *p = (const unsigned char *)buf;
-    while (len > 0) {
-        size_t n = fwrite(p, 1, len, fp);
-        if (n == 0) {
-            if (ferror(fp)) {
-                fprintf(stderr, "ERROR: output write failed (downstream gone)\n");
-                perror("fwrite");
-            }
-            return 0;
-        }
-        p += n;
-        len -= n;
-    }
-    return 1;
-}
-
-static int pjl_printf(FILE *fp, const char *fmt, ...)
-{
-    char buf[512];
     va_list ap;
-    int n;
     va_start(ap, fmt);
-    n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    vfprintf(fp, fmt, ap);
     va_end(ap);
-    if (n < 0) return 0;
-    if ((size_t)n >= sizeof(buf)) n = sizeof(buf) - 1;
-    buf[n] = '\0';
-    if (!write_all(fp, buf, (size_t)n)) return 0;
-    return write_all(fp, "\r\n", 2);
+    fputs("\r\n", fp);
 }
 
 /* ── LHPLH command frame helpers ───────────────────────────────────── */
@@ -391,7 +347,7 @@ static void lhplh_xor_checksum(unsigned char *buf, size_t len)
  *   Bytes 10-62: padding (zeros)
  *   Byte  63:    XOR checksum
  */
-static int write_lhplh_sj(FILE *fp, int copies)
+static void write_lhplh_sj(FILE *fp, int copies)
 {
     unsigned char cmd[LHPLH_CMD_SIZE];
     memset(cmd, 0, sizeof(cmd));
@@ -411,7 +367,7 @@ static int write_lhplh_sj(FILE *fp, int copies)
     /* XOR checksum over bytes 0-62 → byte 63 */
     lhplh_xor_checksum(cmd, sizeof(cmd));
 
-    return write_all(fp, cmd, sizeof(cmd));
+    fwrite(cmd, 1, sizeof(cmd), fp);
 }
 
 /*
@@ -441,7 +397,7 @@ static int write_lhplh_sj(FILE *fp, int copies)
  *     DWORD[4] = 0x00000040 (MX=64)
  *   Bytes 84+:   JBIG T.85 compressed data (no BIE header wrapper)
  */
-static int write_lhplh_sp(FILE *fp,
+static void write_lhplh_sp(FILE *fp,
                             unsigned page_width, unsigned page_height,
                             unsigned resolution,
                             const unsigned char *jbig_data, size_t jbig_len)
@@ -496,15 +452,15 @@ static int write_lhplh_sp(FILE *fp,
     lhplh_xor_checksum(hdr, sizeof(hdr));
 
     /* Write @sp header */
-    if (!write_all(fp, hdr, sizeof(hdr))) return 0;
+    fwrite(hdr, 1, sizeof(hdr), fp);
 
     /* Write JBIG compressed data (with BIH header, matching Windows driver).
      * The Windows driver emits the standard 20-byte JBIG BIH immediately
      * after the @sp frame, then the arithmetic-coded data. The BIH layout is
      * the standard one: byte16=MX, byte19=options (LRLTWO). jbig85 outputs
      * this header at the start of its stream, so we must NOT strip it. */
-    if (jbig_len > 0 && !write_all(fp, jbig_data, jbig_len)) return 0;
-    return 1;
+    if (jbig_len > 0)
+        fwrite(jbig_data, 1, jbig_len, fp);
 }
 
 /*
@@ -522,7 +478,7 @@ static int write_lhplh_sp(FILE *fp,
  *   Bytes 16-62: padding (zeros)
  *   Byte  63:    XOR checksum
  */
-static int write_lhplh_ep(FILE *fp)
+static void write_lhplh_ep(FILE *fp)
 {
     unsigned char cmd[LHPLH_CMD_SIZE];
     memset(cmd, 0, sizeof(cmd));
@@ -536,7 +492,7 @@ static int write_lhplh_ep(FILE *fp)
     /* XOR checksum over bytes 0-62 → byte 63 */
     lhplh_xor_checksum(cmd, sizeof(cmd));
 
-    return write_all(fp, cmd, sizeof(cmd));
+    fwrite(cmd, 1, sizeof(cmd), fp);
 }
 
 /* ── Halftone a single line ────────────────────────────────────────── */
@@ -546,39 +502,20 @@ static void halftone_line(const unsigned char *gray_in,
                           unsigned             width,
                           unsigned             y,
                           int                  negative_print,
-                          unsigned             left_pad_bits)
+                          int                  x_offset)
 {
     unsigned col;
-    unsigned byte_idx = left_pad_bits / 8;
-    /* padding bits must be WHITE (0 in the bit buffer: 1=black).
-     * The old code set them to 0xFF<<n which made them black when
-     * left_pad_bits was not a multiple of 8. */
-    unsigned char byte_val = 0;
-    unsigned bit_pos  = (left_pad_bits % 8) ? (7 - (left_pad_bits % 8)) : 7;
-
+    memset(bit_out, 0, (5120 + 7) / 8);
     for (col = 0; col < width; col++) {
-        unsigned char v = gray_in[col];
-        /*
-         * NegativePrint=false (0): CUPS raster value 0=black, 255=white.
-         *   Black if: (255 - v) > threshold
-         * NegativePrint=true  (1): CUPS raster value 0=white, 255=black.
-         *   Black if: v > threshold
-         */
-        unsigned char threshold = bayer8x8[y % 8][col % 8];
-        int is_black = negative_print ? (v > threshold) : ((255 - v) > threshold);
-        if (is_black) {
-            byte_val |= (1 << bit_pos);
+        int dst = (int)col + x_offset;
+        if (dst >= 0 && dst < 5120) {
+            unsigned byte_idx = (unsigned)dst >> 3;
+            unsigned bit_pos = 7 - ((unsigned)dst & 7);
+            unsigned char v = gray_in[col];
+            unsigned char threshold = bayer8x8[y % 8][col % 8];
+            int is_black = negative_print ? (v > threshold) : ((255 - v) > threshold);
+            if (is_black) bit_out[byte_idx] |= (unsigned char)(1 << bit_pos);
         }
-        if (bit_pos == 0) {
-            bit_out[byte_idx++] = byte_val;
-            byte_val = 0;
-            bit_pos  = 7;
-        } else {
-            bit_pos--;
-        }
-    }
-    if (bit_pos != 7) {
-        bit_out[byte_idx] = byte_val;
     }
 }
 
@@ -601,30 +538,25 @@ static int write_page(FILE *fp, cups_raster_t *ras,
     unsigned cups_width = header->cupsWidth;
     unsigned width      = cups_width;
     unsigned height     = header->cupsHeight;
-    /* Keep one complete blank L0 stripe before raster data and cap the
-     * encoded page at the observed 6755-row firmware boundary. */
+    /* M100D firmware workaround: the printer requires blank stripe(s) at the
+     * top of the page (its JBIG decoder desyncs / refuses to print when the
+     * first stripe contains data). The Windows driver pads 4 stripes (512
+     * rows); tests show 1 blank stripe (128 rows) is sufficient. */
+    /* M100D firmware contract: one complete blank 128-row stripe before
+     * page data.  Do not make this runtime-configurable. */
     unsigned top_pad = 128;
-    if (height + top_pad > 6755) {
-        unsigned input_height = height;
-        height = 6755 - top_pad;
-        fprintf(stderr, "INFO: clipping input from %u to %u rows plus %u top rows\n",
-                input_height, height, top_pad);
-    }
     unsigned total_height = height + top_pad;
-    unsigned lhplh_page_width = 5120;  /* match Windows prn BIE width */
-    /* M100D 打印机实测映射（定位页 + 方框页手工测量）:
-     * 画布 x=0 → 纸张 4.08mm, 600dpi 精确 (1px = 0.04219mm)。
-     * 纸张中心 105mm = 画布 (105-4.08)/0.04219 = 2392px。
-     * 内容中心对齐纸张中心，避免内容在纸张上偏左。
-     * （可打印区本身不对称: 左 4.08mm / 右 ~0, 所以不能只用可打印区居中） */
-    unsigned paper_center_px = 2392;
-    const char *pc_env = getenv("PAPER_CENTER_PX");
-    if (pc_env) {
-        unsigned v = (unsigned)atoi(pc_env);
-        if (v >= 500 && v <= 5000) paper_center_px = v;
+    /* M100D 打印机可打印高度 6755px (纸张 297mm - 顶边距 11.08mm)。
+     * 若内容+padding 超出，警告（内容底部将被裁）。 */
+    if (total_height > 6755) {
+        fprintf(stderr, "WARNING: page height %u exceeds printable 6755px\n",
+                total_height);
     }
-    unsigned left_pad = (paper_center_px > width/2) ?
-                        paper_center_px - width/2 : 0;
+    unsigned lhplh_page_width = 5120;  /* match Windows prn BIE width */
+    /* Do not alter the raster after CUPS has laid it out. Horizontal geometry
+     * belongs to the PPD/imageable area, not the JBIG input. */
+    int x_offset = 0;
+
     unsigned g_stripe_height = 128;  /* L0 */
     int      duplex     = header->Duplex;
     int      resolution = (header->HWResolution[0] >= 1200) ? 1200 : 600;
@@ -666,17 +598,8 @@ static int write_page(FILE *fp, cups_raster_t *ras,
         pjl_printf(fp, "@PJL SET RENDERMODE=GRAYSCALE");
         pjl_printf(fp, "@PJL ENTER LANGUAGE=LHPL");
 
-        /* Abort if the downstream pipe died during the PJL header. */
-        if (ferror(fp)) {
-            fprintf(stderr, "ERROR: output pipe closed during PJL header\n");
-            return 1;
-        }
-
         /* ── LHPLH @sj (Job Setup) ── */
-        if (!write_lhplh_sj(fp, copies)) {
-            fprintf(stderr, "ERROR: failed to write @sj\n");
-            return 1;
-        }
+        write_lhplh_sj(fp, copies);
     }
 
     /* ── Halftone + JBIG compress ── */
@@ -717,7 +640,10 @@ static int write_page(FILE *fp, cups_raster_t *ras,
          * To match: encoder must use TPBON AND the @sp 5th-DWORD high byte
          * must also be 0x08 so the printer decoder enables TPBON.
          */
-        jbg85_enc_options(&jbig_state, JBG_LRLTWO, g_stripe_height, 8);  /* LRLTWO MX=8 (Windows match) */
+        /* Keep arithmetic probability state across SDRST.  The patched
+         * encoder resets only stripe-local reference state at each 128-row
+         * boundary and emits the SDRST marker. */
+        jbg85_enc_options(&jbig_state, JBG_LRLTWO, g_stripe_height, 8);
 
         /* M100D firmware workaround: the printer's JBIG decoder desyncs
          * (everything below prints blank) when a stripe starts with an
@@ -783,25 +709,13 @@ static int write_page(FILE *fp, cups_raster_t *ras,
                 /* CUPS delivers standard grayscale (0=black, 255=white)
                  * regardless of the PPD NegativePrint flag (verified on the
                  * M100D via cupsfilter/texttops). Force standard polarity. */
-                halftone_line(gray_line, cur_line, width, y, 0, left_pad);
+                halftone_line(gray_line, cur_line, width, y, 0, x_offset);
                 memcpy(halftone_buf + ((unsigned long)top_pad + y) * lhplh_bpl,
                        cur_line, lhplh_bpl);
             }
-            /* Log black-pixel distribution before compression. This proves
-             * whether a black lower page came from the input or LHPLH decode. */
-            {
-                unsigned long black[3] = { 0, 0, 0 };
-                unsigned row, off;
-                for (row = 0; row < total_height; row++) {
-                    const unsigned char *p = halftone_buf + (unsigned long)row * lhplh_bpl;
-                    unsigned band = ((unsigned long)row * 3) / total_height;
-                    if (band > 2) band = 2;
-                    for (off = 0; off < lhplh_bpl; off++)
-                        black[band] += (unsigned long)__builtin_popcount((unsigned)p[off]);
-                }
-                fprintf(stderr, "INFO: black pixels thirds=%lu,%lu,%lu\n",
-                        black[0], black[1], black[2]);
-            }
+            /* SDRST itself establishes the per-stripe prediction boundary.
+             * Do not alter bitmap rows: the encoder keeps probability state
+             * but resets stripe-local references when it emits SDRST. */
             /* Pass 2: encode from buffer */
             for (y = 0; y < total_height; y++) {
                 memcpy(cur_line, halftone_buf + (unsigned long)y * lhplh_bpl,
@@ -865,7 +779,7 @@ static int write_page(FILE *fp, cups_raster_t *ras,
              * left-aligned and the remaining pixels are white.
              */
             memset(cur_line, 0, lhplh_bpl);  /* Zero-fill entire line (white) */
-            halftone_line(gray_line, cur_line, width, y, header->NegativePrint, left_pad);
+            halftone_line(gray_line, cur_line, width, y, header->NegativePrint, x_offset);
             jbg85_enc_lineout(&jbig_state, cur_line, prev_line, prev2_line);
             unsigned char *tmp = prev2_line;
             prev2_line = prev_line;
@@ -873,23 +787,24 @@ static int write_page(FILE *fp, cups_raster_t *ras,
             cur_line   = tmp;
         }
         #endif
-        /* jbig85 emits SDRST at each stripe boundary. Count the actual
-         * markers rather than rewriting compressed bytes after encoding. */
+        /*
+         * The jbig85 encoder outputs SDNORM (0xFF 0x02) at the end of each
+         * stripe, but the Windows driver uses SDRST (0xFF 0x03) instead.
+         * Replace all SDNORM markers with SDRST in the JBIG stream so the
+         * printer can decode the data correctly.
+         *
+         * Note: we must NOT replace 0xFF 0x00 (escaped 0xFF byte in data)
+         * — only the SDNORM marker (0xFF 0x02) should become SDRST.
+         */
         {
+            /* Only replace the LAST SDNORM with SDRST */
             size_t j;
-            unsigned markers = 0;
-            for (j = 1; j < jbig_out.len; j++)
-                if (jbig_out.buf[j - 1] == 0xff && jbig_out.buf[j] == 0x03)
-                    markers++;
-            fprintf(stderr,
-                    "INFO: JBIG BIH width=%u height=%u L0=%u MX=%u options=0x%02x SDRST=%u\\n",
-                    ((unsigned)jbig_out.buf[4] << 24) | ((unsigned)jbig_out.buf[5] << 16) |
-                    ((unsigned)jbig_out.buf[6] << 8) | jbig_out.buf[7],
-                    ((unsigned)jbig_out.buf[8] << 24) | ((unsigned)jbig_out.buf[9] << 16) |
-                    ((unsigned)jbig_out.buf[10] << 8) | jbig_out.buf[11],
-                    ((unsigned)jbig_out.buf[12] << 24) | ((unsigned)jbig_out.buf[13] << 16) |
-                    ((unsigned)jbig_out.buf[14] << 8) | jbig_out.buf[15],
-                    jbig_out.buf[16], jbig_out.buf[19], markers);
+            for (j = jbig_out.len; j > 0; j--) {
+                if (jbig_out.buf[j - 1] == 0xff && jbig_out.buf[j] == 0x02) {
+                    jbig_out.buf[j] = 0x03;  /* last SDNORM → SDRST */
+                    break;
+                }
+            }
         }
 
         /* ── LHPLH @sp (Page Data) ── */
@@ -902,10 +817,8 @@ static int write_page(FILE *fp, cups_raster_t *ras,
         {
             size_t jbig_start = 0;  /* keep BIH header (Windows driver match) */
             size_t jbig_len   = jbig_out.len > jbig_start ? jbig_out.len - jbig_start : 0;
-            if (!write_lhplh_sp(fp, lhplh_page_width, total_height, resolution,
-                               jbig_out.buf + jbig_start, jbig_len)) {
-                fprintf(stderr, "ERROR: failed to write @sp page %u\n", page_num);
-            }
+            write_lhplh_sp(fp, lhplh_page_width, total_height, resolution,
+                           jbig_out.buf + jbig_start, jbig_len);
         }
 
         fprintf(stderr, "INFO: page %d %ux%u @ %ddpi, JBIG %zu bytes\n",
@@ -916,9 +829,7 @@ static int write_page(FILE *fp, cups_raster_t *ras,
     }
 
     /* ── LHPLH @ep (End Page) ── */
-    if (!write_lhplh_ep(fp)) {
-        fprintf(stderr, "ERROR: failed to write @ep\n");
-    }
+    write_lhplh_ep(fp);
 
     /* ── PJL footer ── */
     pjl_printf(fp, "\x1b%%-12345X@PJL EOJ");
@@ -928,260 +839,86 @@ static int write_page(FILE *fp, cups_raster_t *ras,
 
 /* ── Main ──────────────────────────────────────────────────────────── */
 
-/* ── IJS server: big-endian int (matches Java DataOutput/DataInput) ────── */
-static int be_read_int(void)
-{
-    unsigned char b[4];
-    ssize_t n;
-    size_t got = 0;
-    while (got < 4) {
-        n = read(0, b + got, 4 - got);
-        if (n <= 0) return -1;  /* EOF/error */
-        got += (size_t)n;
-    }
-    return (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
-}
-
-static int be_write_int(int v)
-{
-    unsigned char b[4];
-    b[0] = (unsigned char)(v >> 24);
-    b[1] = (unsigned char)(v >> 16);
-    b[2] = (unsigned char)(v >> 8);
-    b[3] = (unsigned char)(v & 0xff);
-    return write_all(stdout, b, 4);
-}
-
-/* Read exactly len payload bytes; returns bytes read or -1 on EOF. */
-static long be_read_payload(unsigned char *out, int len)
-{
-    long total = 0;
-    while (total < len) {
-        ssize_t n = read(0, out + total, (size_t)(len - total));
-        if (n <= 0) return -1;
-        total += n;
-    }
-    return total;
-}
-
 int main(int argc, char *argv[])
 {
+    int fd = 0;
+    cups_raster_t *ras;
+    cups_header_subset_t header;
+    int page = 0, copies = 1;
+
     signal(SIGPIPE, SIG_IGN);
 
-    fprintf(stderr, "FILTER: IJS server v42 started, argc=%d\n", argc);
-    fflush(stderr);
+    if (argc < 6) {
+        fprintf(stderr, "Usage: %s job-id user title copies options [file]\n", argv[0]);
+        return 1;
+    }
 
-    /* ── Phase 1: handshake (mirror of k/a.e()) ──
-     * client writes "IJS\n 0xFC v1 \n" on stdin; server replies on stdout:
-     *   line "IJS" + byte 0xAB + line "v1"
-     * then client sends frame(2, len=12, arg=30) and server replies
-     *   frame(3, len=12, val>=30).
-     */
-    {
-        /* consume exactly "IJS\n 0xFC v1 \n" from stdin (8 bytes). */
-        unsigned char h[8];
-        if (be_read_payload(h, 8) != 8) {
-            fprintf(stderr, "IJS: handshake read failed (expected 8 bytes)\n");
-            fflush(stderr);
+    if (argc >= 7) {
+        fd = open(argv[6], O_RDONLY);
+        if (fd < 0) {
+            fprintf(stderr, "ERROR: cannot open %s\n", argv[6]);
             return 1;
         }
-        fprintf(stderr, "IJS: got handshake bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                h[0],h[1],h[2],h[3],h[4],h[5],h[6],h[7]);
-        fflush(stderr);
-        /* reply "IJS\n" + 0xAB + "v1\n" */
-        if (!write_all(stdout, "IJS\n", 4)) { fprintf(stderr,"IJS: reply1 failed\n"); return 1; }
-        { unsigned char ab = 0xAB; if (!write_all(stdout, &ab, 1)) return 1; }
-        if (!write_all(stdout, "v1\n", 3)) return 1;
-        fflush(stdout);
     }
 
-    /* ── Phase 2: frame loop ──
-     * client sends length-prefixed frames: writeInt(opcode) writeInt(len) [len-8]
-     * server replies: writeInt(reply) writeInt(replyLen) [payload].
-     */
-    /* Collect opcode-15 (s=send raster/data) payloads into a file for offline
-     * analysis, and record job parameters (opcode 12) seen. */
-    {
-        const char *work_dir = "/data/user/0/com.dynamixsoftware.printershare/files/drv_m100d";
-        const char *raster_path = "/data/user/0/com.dynamixsoftware.printershare/files/drv_m100d/ijsraster.bin";
-        FILE *dataf = fopen("/data/user/0/com.dynamixsoftware.printershare/files/drv_m100d/ijsdata.bin", "wb");
-        FILE *rasterf = fopen(raster_path, "w+b");
-        (void)work_dir;
-        long long op15_total = 0;
-        unsigned raster_rows = 0;
-        unsigned raster_width = 4780;
-        unsigned raster_height = 6765;
-        unsigned raster_bpl = raster_width * 3;
-        if (!rasterf) {
-            fprintf(stderr, "IJS: cannot create temporary raster file\n");
-            return 1;
-        }
-        /* Reserve a synthetic CUPS Raster v2 header. The IJS client sends
-         * one RGB scanline per opcode 15, so the existing, hardware-tested
-         * CUPS-to-LHPLH writer can be reused unchanged at the end. */
-        {
-            unsigned sync = CUPS_RASTER_SYNC;
-            unsigned char header[CUPS_HEADER_SIZE];
-            memset(header, 0, sizeof(header));
-            fwrite(&sync, 1, 4, rasterf);
-            fwrite(header, 1, sizeof(header) - 4, rasterf);
-        }
+    /* Parse copies from argv[4] */
+    if (argv[4])
+        copies = atoi(argv[4]);
+    if (copies < 1) copies = 1;
 
-    for (;;) {
-        int opcode = be_read_int();
-        if (opcode < 0) {
-            fprintf(stderr, "IJS: EOF reading opcode, server done (op15_total=%lld)\n", op15_total);
-            fflush(stderr);
-            break;
-        }
-        int flen = be_read_int();
-        if (flen < 8) { fprintf(stderr, "IJS: bad frame len %d (op=%d)\n", flen, opcode); break; }
-        int paylen = flen - 8;
-        unsigned char pay[262144];
-        int data_len = 0;
-        /* opcode 15 is special: the frame declares only its two integer
-         * fields (channel and byte count); the raster bytes follow outside
-         * the declared frame length.  Java k.a.s() writes p(15, channel,
-         * count), then writes the raster buffer directly. */
-        if (opcode == 15) {
-            if (paylen != 8) {
-                fprintf(stderr, "IJS: bad opcode 15 header length %d\n", paylen);
-                break;
-            }
-            if (be_read_payload(pay, 8) != 8) {
-                fprintf(stderr, "IJS: short opcode 15 header\n");
-                break;
-            }
-            data_len = ((int)pay[4] << 24) | ((int)pay[5] << 16) |
-                       ((int)pay[6] << 8) | (int)pay[7];
-            if (data_len < 0) {
-                fprintf(stderr, "IJS: invalid opcode 15 byte count %d\n", data_len);
-                break;
-            }
-        } else {
-            if (paylen > (int)sizeof(pay)) paylen = (int)sizeof(pay);
-            if (paylen > 0 && be_read_payload(pay, paylen) != paylen) {
-                fprintf(stderr, "IJS: short payload read\n"); break;
-            }
-        }
-
-        if (opcode == 15) {
-            unsigned char chunk[8192];
-            int remaining = data_len;
-            while (remaining > 0) {
-                int n = remaining > (int)sizeof(chunk) ? (int)sizeof(chunk) : remaining;
-                if (be_read_payload(chunk, n) != n) {
-                    fprintf(stderr, "IJS: short opcode 15 data (%d bytes remain)\n", remaining);
-                    remaining = -1;
-                    break;
-                }
-                if (dataf && fwrite(chunk, 1, (size_t)n, dataf) != (size_t)n) {
-                    fprintf(stderr, "IJS: opcode 15 data file write failed\n");
-                }
-                if (rasterf && fwrite(chunk, 1, (size_t)n, rasterf) != (size_t)n) {
-                    fprintf(stderr, "IJS: temporary raster write failed\n");
-                    remaining = -1;
-                    break;
-                }
-                remaining -= n;
-            }
-            if (remaining < 0) break;
-            if (data_len == (int)raster_bpl) raster_rows++;
-            op15_total += data_len;
-        }
-
-        fprintf(stderr, "IJS frame: opcode=%d len=%d payload[%d]: ", opcode, flen, paylen);
-        { int i; for (i = 0; i < paylen && i < 32; i++) fprintf(stderr, "%02x ", pay[i]); }
-        fprintf(stderr, "\n");
-        if (opcode == 12 && paylen >= 9) {
-            /* payload = int(arg) int(combined) key NUL value  */
-            int klen = (pay[7] << 24) | (pay[6] << 16) | (pay[5] << 8) | pay[4];
-            if (klen > 0 && klen < paylen) {
-                fprintf(stderr, "IJS param: arg=0%.2X key=\"%.*s\" val=\"%s\"\n",
-                        (unsigned)pay[8], klen, pay + 9,
-                        (const char *)(pay + 9 + klen));
-            }
-        }
-        fflush(stderr);
-
-        if (opcode == 17) {
-            /* opcode 17 is not an acknowledged IJS command. Java sends it
-             * immediately before procWait(), so waiting for more input here
-             * deadlocks the child and leaves the app stuck at job completion. */
-            fprintf(stderr, "IJS: opcode 17 received; finishing filter\n");
-            fflush(stderr);
-            break;
-        } else if (opcode == 2) {
-            be_write_int(3); be_write_int(12); be_write_int(30);
-            fflush(stdout);
-            fprintf(stderr, "IJS: replied handshake confirm (op=3 val=30)\n");
-        } else if (opcode == 15) {
-            /* data chunk ack: success */
-            be_write_int(0); be_write_int(8);
-            fflush(stdout);
-        } else {
-            be_write_int(0); be_write_int(8);
-            fflush(stdout);
-        }
+    ras = ras_open(fd);
+    if (!ras) {
+        fprintf(stderr, "ERROR: raster open failed\n");
+        if (fd > 0) close(fd);
+        return 1;
     }
 
-    if (dataf) { fclose(dataf); }
-    fprintf(stderr, "IJS: op15 total received = %lld bytes (%u rows)\n",
-            op15_total, raster_rows);
-    fflush(stderr);
+    while (ras_read_header(ras, &header)) {
+        if (header.cupsWidth == 0 || header.cupsHeight == 0) continue;
+        if (header.cupsWidth > MAX_PAGE_WIDTH || header.cupsHeight > MAX_PAGE_HEIGHT) break;
 
-    /* The IJS control stream is only a transport wrapper. Once opcode 5
-     * (job end) arrives, turn the collected RGB scanlines into the same
-     * CUPS Raster input consumed by write_page(), then emit real PJL/LHPLH
-     * bytes on stdout for q's printer-output pump. */
-    if (rasterf && raster_rows > 0) {
-        unsigned char header[CUPS_HEADER_SIZE];
-        unsigned sync = CUPS_RASTER_SYNC;
-        memset(header, 0, sizeof(header));
-        memcpy(header, &sync, 4);
-        put_u32(header, 372 + 4, raster_width);
-        put_u32(header, 376 + 4, raster_rows < raster_height ? raster_rows : raster_height);
-        put_u32(header, 272 + 4, 0);       /* Duplex */
-        put_u32(header, 276 + 4, 600);     /* HWResolution X */
-        put_u32(header, 280 + 4, 600);     /* HWResolution Y */
-        put_u32(header, 340 + 4, 1);       /* NumCopies */
-        put_u32(header, 388 + 4, 24);      /* cupsBitsPerPixel */
-        put_u32(header, 392 + 4, raster_bpl);
-        put_u32(header, 400 + 4, CUPS_CSPACE_RGB);
-        rewind(rasterf);
-        if (fwrite(header, 1, sizeof(header), rasterf) != sizeof(header) ||
-            fflush(rasterf) != 0 || fseek(rasterf, 0, SEEK_SET) != 0) {
-            fprintf(stderr, "IJS: failed to prepare synthetic raster header\n");
+        /* Use NumCopies from CUPS header if available */
+        if (header.NumCopies > 0)
+            copies = header.NumCopies;
+
+        /* Convert RGB to grayscale in the header if needed */
+        if (header.cupsColorSpace == CUPS_CSPACE_RGB ||
+            header.cupsColorSpace == CUPS_CSPACE_RGB2) {
+            fprintf(stderr, "WARNING: RGB input (cspace=%d), converting to gray\n",
+                    header.cupsColorSpace);
+            /* Don't change cspace — the main loop handles inline conversion */
         }
-        {
-            cups_raster_t ras;
-            cups_header_subset_t rh;
-            memset(&ras, 0, sizeof(ras));
-            ras.fd = fileno(rasterf);
-            if (ras_read_header(&ras, &rh)) {
-                FILE *printer = fdopen(100, "wb");
-                if (!printer) {
-                    fprintf(stderr, "IJS: fdopen(100) failed\n");
-                } else {
-                    if (write_page(printer, &ras, &rh, 1, 1, "PrinterShare", "PrinterShare") != 0)
-                        fprintf(stderr, "IJS: write_page failed\n");
-                    fflush(printer);
-                    fclose(printer);
-                }
-            } else {
-                fprintf(stderr, "IJS: synthetic raster header rejected\n");
-            }
+        /* Convert PWG gray to CUPS gray (17 = GRAY, 8bpp) */
+        if (header.cupsColorSpace == CUPS_CSPACE_W2) {
+            header.cupsColorSpace = CUPS_CSPACE_GRAY;
         }
-    } else {
-        fprintf(stderr, "IJS: no complete RGB scanlines received\n");
-    }
-    if (rasterf) {
-        fclose(rasterf);
-        unlink(raster_path);
-    }
+        /* Convert CUPS-CSPACE-W (0, 1bpp) to GRAY (17, 8bpp) in header */
+        if (header.cupsColorSpace == CUPS_CSPACE_W ||
+            header.cupsColorSpace == CUPS_CSPACE_K) {
+            fprintf(stderr, "INFO: 1bpp input (cspace=%d), expanding to 8bpp in filter\n",
+                    header.cupsColorSpace);
+        }
+
+        page++;
+        fprintf(stderr, "INFO: page %d, %ux%u @ %ux%u dpi, %d bpp\n",
+                page, header.cupsWidth, header.cupsHeight,
+                header.HWResolution[0], header.HWResolution[1],
+                header.cupsBitsPerPixel);
+
+        /*
+         * We can't peek ahead in the CUPS raster stream to determine
+         * if this is the last page. So we always write PJL EOJ after
+         * each page. For single-page jobs (the common case), this is
+         * identical to the original driver. For multi-page jobs, each
+         * page becomes a separate PJL job — the printer handles this
+         * correctly by printing each page in sequence.
+         */
+        if (write_page(stdout, ras, &header, page, copies,
+                       argv[3], argv[2]) != 0) break;
     }
 
-    fprintf(stderr, "IJS: server exiting\n");
-    fflush(stderr);
+    ras_close(ras);
+    if (fd > 0) close(fd);
+    fprintf(stderr, "INFO: %d page(s) processed\n", page);
     return 0;
 }

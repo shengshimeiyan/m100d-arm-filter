@@ -285,7 +285,7 @@ void jbg85_enc_lineout(struct jbg85_enc_state *s, unsigned char *line,
     }
 
     /* Keep arithmetic probability state across M100D SDRST. */
-    arith_encode_init(&s->s, 1);
+    arith_encode_init(&s->s, 0);
   }
 
 #ifdef DEBUG

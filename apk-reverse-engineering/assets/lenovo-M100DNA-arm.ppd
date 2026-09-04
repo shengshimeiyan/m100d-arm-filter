@@ -5,18 +5,18 @@
 *LanguageVersion: English
 
 *Manufacturer: "Lenovo"
-*PCFileName: "Lenovo M100D ARM.PPD"
-*Product: "(Lenovo M100D)"
+*PCFileName: "Lenovo M100DNANA ARM.PPD"
+*Product: "(Lenovo M100DNANA)"
 *PSVersion: "(3015.103) 1"
-*ShortNickName: "Lenovo M100D (ARM)"
-*ModelName: "Lenovo M100D ARM"
-*NickName: "Lenovo M100D ARM v2.0 (open-source filter)"
+*ShortNickName: "Lenovo M100DNANA (ARM)"
+*ModelName: "Lenovo M100DNANA ARM"
+*NickName: "Lenovo M100DNANA ARM v2.0 (open-source filter)"
 *cupsFilter: "application/vnd.cups-raster 50 rastertolhplh"
 *cupsFilter2: "application/vnd.cups-raster application/vnd.cups-raster 50 rastertolhplh"
 *cupsFilter2: "image/pwg-raster application/vnd.cups-raster 50 rastertolhplh"
 
 *% == Device Identification ==
-*1284DeviceID: "MFG:Lenovo;MDL:M100D;DES:Lenovo M100D;CMD:GDI;CLS:PRINTER;"
+*1284DeviceID: "MFG:Lenovo;MDL:M100DNA;DES:Lenovo M100DNANA;CMD:GDI;CLS:PRINTER;"
 
 *% == Device Capabilities ==
 *LanguageLevel: "3"
@@ -58,7 +58,7 @@
 
 *DefaultImageableArea: A4
 *ImageableArea Letter/US Letter: "11.905511856079 11.905511856079 600.094482421875 780.094482421875"
-*ImageableArea A4/A4: "18.6 1.0 595.0 796.2"
+*ImageableArea A4/A4: "18.6 1.0 576.9 796.2"
 *ImageableArea A5/A5: "11.905511856079 11.905511856079 408.094482421875 583.094482421875"
 *ImageableArea A6/A6: "11.905511856079 11.905511856079 285.094482421875 408.094482421875"
 *ImageableArea B5/JIS B5: "11.905511856079 11.905511856079 504.094482421875 717.094482421875"

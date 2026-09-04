@@ -9,6 +9,7 @@ set -e
 
 FILTER="rastertolhplh"
 PPD="lenovo-M100D-arm.ppd"
+JBIG_KIT_URL="https://www.cl.cam.ac.uk/~mgk25/jbigkit/download/jbigkit-2.1.tar.gz"
 FILTER_DIR="/usr/lib/cups/filter"
 PPD_DIR="/usr/share/ppd/Lenovo"
 DEV_DIR="/usr/lib/udev/rules.d"
@@ -22,7 +23,7 @@ echo "============================================"
 echo ""
 
 # ── 1. 安装编译依赖 ──
-echo "[1/3] 检查编译依赖..."
+echo "[1/4] 检查编译依赖..."
 if ! command -v gcc &>/dev/null; then
     echo "  安装 gcc..."
     sudo apt-get install -y gcc make
@@ -30,9 +31,21 @@ fi
 echo "  gcc: $(gcc --version 2>/dev/null | head -1)"
 echo "  ✓ 编译依赖就绪"
 
-# ── 2. 编译（jbig/ 内置修改版 jbigkit，无需下载）──
+# ── 2. 下载JBIG-KIT ──
 echo ""
-echo "[2/3] 编译过滤器..."
+echo "[2/4] 准备JBIG-KIT..."
+if [ ! -d "jbigkit-2.1/libjbig" ]; then
+    echo "  下载 jbigkit-2.1..."
+    wget -q "$JBIG_KIT_URL" -O jbigkit-2.1.tar.gz
+    tar xzf jbigkit-2.1.tar.gz
+    echo "  ✓ 下载完成"
+else
+    echo "  ✓ jbigkit-2.1 已存在"
+fi
+
+# ── 3. 编译 ──
+echo ""
+echo "[3/4] 编译过滤器..."
 make clean 2>/dev/null || true
 make
 echo "  ✓ 编译成功"
@@ -46,9 +59,9 @@ if [ $BUILD_ONLY -eq 1 ]; then
     exit 0
 fi
 
-# ── 3. 安装 ──
+# ── 4. 安装 ──
 echo ""
-echo "[3/3] 安装..."
+echo "[4/4] 安装..."
 
 # 安装过滤器
 sudo install -d "$FILTER_DIR"

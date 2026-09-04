@@ -49,3 +49,6 @@ analysis/windows-driver/*.INF
 *.bak*
 rastertolhplh_dbg
 rastertolhplh-*-dbg
+# Generated local ARM binaries (release binaries are published separately)
+rastertolhplh_*
+rastertolhplh.aarch64

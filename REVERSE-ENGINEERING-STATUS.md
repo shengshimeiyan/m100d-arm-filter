@@ -183,7 +183,7 @@ The filter now does **two passes** over the raster:
 3. **Pass 2**: feed the modified buffer into `jbg85_enc_lineout()`.
 
 This forces the printer's decoder to never see a `SDRST`-followed-by-
-white-first-line stripe boundary, working around the firmware desync.
+SDRST stripe reset with a 128-row top blank stripe; full arithmetic reset is required by the validated M100D path.
 
 ### Build artefacts (this round)
 - `rastertolhplh-aarch64` md5 `b82de42d0242620ea1132f3cd10590a1`

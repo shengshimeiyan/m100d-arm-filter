@@ -2,7 +2,9 @@
 # Replaces the proprietary lnthr8zfilter.app (x86-64 only)
 #
 # This filter is STANDALONE — no libcups/libcupsimage dependency.
-# The patched jbigkit-2.1 sources are vendored in jbig/ — no download needed.
+# Only needs: gcc, the vendored patched JBIG-KIT 2.1 sources, and libm
+# v3.0.2 is intentionally based on the v3.0.0 CUPS entry point; v3.0.1 is
+# not used because its Linux CUPS raster entry point is incompatible.
 #
 # Quick build on ARM device:
 #   make
